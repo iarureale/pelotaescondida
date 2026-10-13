@@ -4,6 +4,12 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+import warnings
+
+# Texturas de banderas (PNG 14:9). Un objeto "bandera" del mapa elige una con
+# el campo "textura"; si el archivo no existe se usa tela lisa y se avisa.
+DIR_BANDERAS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "assets", "banderas")
 
 
 def crear_escena(base_xml: str, mapa, incluir_bola: bool = False) -> tuple[str, list[str]]:
@@ -39,11 +45,14 @@ def crear_escena(base_xml: str, mapa, incluir_bola: bool = False) -> tuple[str, 
         '<global azimuth="-130" elevation="-20"/>',
         '<global azimuth="-132" elevation="-24" offwidth="1280" '
         'offheight="720"/>', 1)
+    if (getattr(mapa, "escenario", None) or {}).get("parque"):
+        scene_xml = _mejorar_iluminacion(scene_xml)
     scene_xml = scene_xml.replace('<include file="go2.xml"/>',
                                   f'<include file="{os.path.basename(robot_tmp.name)}"/>')
     media = mapa.tamano_celda / 2
     obstaculos = []
     escenario = getattr(mapa, "escenario", {}) or {}
+    assets_banderas, banderas_disponibles = _assets_banderas(escenario)
     celdas_decoradas = set()
     for fila in range(mapa.filas):
         for columna in range(mapa.columnas):
@@ -54,7 +63,8 @@ def crear_escena(base_xml: str, mapa, incluir_bola: bool = False) -> tuple[str, 
                              if tuple(obj.get("celda", ())) == celda), None)
             if decorado:
                 celdas_decoradas.add(celda)
-                obstaculos.extend(_geometria_decorado(mapa, decorado, celda))
+                obstaculos.extend(_geometria_decorado(
+                    mapa, decorado, celda, banderas_disponibles))
                 continue
             x, y = mapa.a_mundo(fila, columna)
             obstaculos.append(
@@ -81,6 +91,11 @@ def crear_escena(base_xml: str, mapa, incluir_bola: bool = False) -> tuple[str, 
         raise ValueError("La escena MJCF no contiene <worldbody>.")
     scene_xml = (scene_xml[:cierre] + "\n" + "\n".join(obstaculos)
                  + "\n  " + scene_xml[cierre:])
+    if assets_banderas:
+        fin_modelo = scene_xml.rfind("</mujoco>")
+        scene_xml = (scene_xml[:fin_modelo] + "  <asset>\n"
+                     + "\n".join(assets_banderas) + "\n  </asset>\n"
+                     + scene_xml[fin_modelo:])
     scene_tmp = tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", suffix="_go2_course.xml", prefix=".",
         dir=directorio, delete=False)
@@ -90,7 +105,58 @@ def crear_escena(base_xml: str, mapa, incluir_bola: bool = False) -> tuple[str, 
     return scene_tmp.name, temporales
 
 
-def _geometria_decorado(mapa, objeto: dict, celda: tuple[int, int]) -> list[str]:
+# Retoques puramente visuales de la escena limpia (no tocan colisiones,
+# coordenadas ni la percepción, que usa segmentación y profundidad): luz de sol
+# inclinada con sombras en lugar de una luz cenital que quemaba el piso, cielo
+# claro, horizonte neblinoso y suelo exterior verde mate sin reflejos (el
+# reflejo del piso obligaba a renderizar la escena dos veces).
+_AJUSTES_VISUALES = (
+    ('<headlight diffuse="0.6 0.6 0.6" ambient="0.35 0.35 0.35" specular="0 0 0"/>',
+     '<headlight diffuse="0.20 0.20 0.20" ambient="0.45 0.45 0.45" specular="0 0 0"/>'),
+    ('<rgba haze="0.15 0.25 0.35 1"/>', '<rgba haze="0.74 0.82 0.90 1"/>'),
+    ('rgb1="0.3 0.5 0.7" rgb2="0 0 0"', 'rgb1="0.36 0.58 0.86" rgb2="0.86 0.91 0.96"'),
+    ('rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8"',
+     'rgb1="0.34 0.44 0.30" rgb2="0.31 0.41 0.28" markrgb="0.34 0.44 0.30"'),
+    ('reflectance="0.2"', 'reflectance="0"'),
+    ('<light pos="0 0 1.5" dir="0 0 -1" directional="true"/>',
+     '<light name="sol" pos="0 0 12" dir="0.35 0.45 -1" directional="true" '
+     'castshadow="true" diffuse="0.80 0.77 0.68" specular="0.05 0.05 0.05"/>'),
+)
+
+
+def _mejorar_iluminacion(scene_xml: str) -> str:
+    """Aplica los ajustes que encuentre; una plantilla distinta no falla."""
+    for viejo, nuevo in _AJUSTES_VISUALES:
+        scene_xml = scene_xml.replace(viejo, nuevo, 1)
+    return scene_xml
+
+
+def _assets_banderas(escenario: dict) -> tuple[list[str], set[str]]:
+    """<texture>/<material> para cada textura de bandera con archivo presente."""
+    assets, disponibles = [], set()
+    for objeto in escenario.get("objetos", []):
+        nombre = objeto.get("textura") if objeto.get("tipo") == "bandera" else None
+        if not nombre or nombre in disponibles:
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9_]+", nombre):
+            raise ValueError(f"Nombre de textura de bandera inválido: {nombre!r}")
+        archivo = os.path.join(DIR_BANDERAS, f"bandera_{nombre}.png")
+        if not os.path.isfile(archivo):
+            warnings.warn(f"Falta la textura {archivo}; la bandera "
+                          f"{nombre!r} se dibuja como tela lisa.")
+            continue
+        disponibles.add(nombre)
+        ruta = archivo.replace("\\", "/")
+        assets.append(f'    <texture name="tex_bandera_{nombre}" type="2d" '
+                      f'file="{ruta}"/>')
+        assets.append(f'    <material name="mat_bandera_{nombre}" '
+                      f'texture="tex_bandera_{nombre}" specular="0" '
+                      'shininess="0"/>')
+    return assets, disponibles
+
+
+def _geometria_decorado(mapa, objeto: dict, celda: tuple[int, int],
+                        banderas_disponibles=frozenset()) -> list[str]:
     """Primitivas con nombres estables; todos los obstáculos tienen colisión."""
     tipo = objeto.get("tipo")
     fila, columna = celda
@@ -176,11 +242,18 @@ def _geometria_decorado(mapa, objeto: dict, celda: tuple[int, int]) -> list[str]
             f'<geom name="{nombre}_pie" type="cylinder" size="0.06 0.29" '
             f'pos="{x} {y} 0.31" rgba="0.35 0.37 0.36 1" {solido}/>']
     if tipo == "bandera":
+        # Tela con proporción 14:9 (1,26 x 0,81 m) pegada al mástil, sin
+        # colisión y a 3,3 m del piso: no interfiere con el robot ni su cámara.
+        textura = objeto.get("textura")
+        if textura in banderas_disponibles:
+            aspecto = f'material="mat_bandera_{textura}" rgba="1 1 1 1"'
+        else:
+            aspecto = 'rgba="0.30 0.55 0.82 1"'
         return [
             f'<geom name="{nombre}_mastil" type="cylinder" size="0.035 2.1" '
             f'pos="{x} {y} 2.12" rgba="0.76 0.77 0.75 1" {solido}/> ',
-            f'<geom name="{nombre}_tela" type="box" size="0.42 0.025 0.28" '
-            f'pos="{x + 0.40} {y} 3.70" rgba="0.30 0.55 0.82 1" {sin_colision}/>']
+            f'<geom name="{nombre}_tela" type="box" size="0.63 0.012 0.405" '
+            f'pos="{x + 0.665:.3f} {y} 3.72" {aspecto} {sin_colision}/>']
     raise ValueError(f"Tipo de obstáculo desconocido en escenario: {tipo!r}")
 
 

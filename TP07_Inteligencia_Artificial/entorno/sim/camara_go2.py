@@ -129,10 +129,41 @@ class CamaraGo2:
         self.renderer.close()
 
 
+_TABLAS_CATEGORIAS: dict = {}
+
+
+def _tabla_categorias(model, mujoco):
+    """(nombres, categorias, es_objeto) por geom_id, calculada una vez por modelo.
+
+    El modelo no cambia durante una misión; recorrer los ~400 geoms con
+    mj_id2name en cada cuadro era trabajo repetido.
+    """
+    import numpy as np
+
+    clave = id(model)
+    cacheada = _TABLAS_CATEGORIAS.get(clave)
+    if cacheada is not None and cacheada[0] is model:
+        return cacheada[1]
+    nombres = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, i)
+               for i in range(model.ngeom)]
+    categorias = [_categoria_geometria(n) for n in nombres]
+    es_objeto = np.array([c is not None for c in categorias], dtype=bool)
+    if len(_TABLAS_CATEGORIAS) >= 4:
+        _TABLAS_CATEGORIAS.pop(next(iter(_TABLAS_CATEGORIAS)))
+    tabla = (nombres, categorias, es_objeto)
+    _TABLAS_CATEGORIAS[clave] = (model, tabla)
+    return tabla
+
+
 def detectar_objetos_segmentados(segmentacion, profundidad, model, mujoco,
                                  fovy_deg: float = 60.0,
                                  pixeles_minimos: int = 8):
-    """Detecta objetos etiquetados en píxeles y obtiene rango del depth map."""
+    """Detecta objetos etiquetados en píxeles y obtiene rango del depth map.
+
+    Una sola pasada sobre los píxeles etiquetados (agrupados por geom_id) en
+    lugar de una máscara de imagen completa por cada geom: mismo resultado,
+    costo proporcional a los píxeles de objetos y no a ngeom x píxeles.
+    """
     import numpy as np
 
     seg = np.asarray(segmentacion)
@@ -142,28 +173,41 @@ def detectar_objetos_segmentados(segmentacion, profundidad, model, mujoco,
     alto, ancho = seg.shape[:2]
     focal_px = alto / (2.0 * math.tan(math.radians(fovy_deg) / 2.0))
     tipo_geom = int(mujoco.mjtObj.mjOBJ_GEOM)
+    nombres, categorias, es_objeto = _tabla_categorias(model, mujoco)
+
+    ids = seg[:, :, 0].ravel()
+    de_geom = seg[:, :, 1].ravel() == tipo_geom
+    candidato = de_geom & (ids >= 0) & (ids < len(es_objeto))
+    candidato[candidato] = es_objeto[ids[candidato]]
+    indices = np.flatnonzero(candidato)
+    if not len(indices):
+        return []
+    ids_c = ids[indices]
+    orden = np.argsort(ids_c, kind="stable")
+    indices, ids_c = indices[orden], ids_c[orden]
+    inicios = np.flatnonzero(np.r_[True, ids_c[1:] != ids_c[:-1]])
+    fines = np.r_[inicios[1:], len(ids_c)]
+    depth_plano = depth.reshape(-1)
+
     detecciones = []
-    for geom_id in range(model.ngeom):
-        nombre = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id)
-        categoria = _categoria_geometria(nombre)
-        if categoria is None:
+    for a, b in zip(inicios, fines):
+        if b - a < pixeles_minimos:
             continue
-        mascara = (seg[:, :, 0] == geom_id) & (seg[:, :, 1] == tipo_geom)
-        ys, xs = np.nonzero(mascara)
-        if len(xs) < pixeles_minimos:
-            continue
-        distancias = depth[ys, xs]
+        geom_id = int(ids_c[a])
+        px = indices[a:b]
+        distancias = depth_plano[px]
         validas = distancias[np.isfinite(distancias) & (distancias > 0)]
         if not len(validas):
             continue
-        cx = float((int(xs.min()) + int(xs.max())) / 2.0)
-        cy = float((int(ys.min()) + int(ys.max())) / 2.0)
-        bearing = math.atan2(cx - (ancho - 1) / 2.0, focal_px)
+        xs, ys = px % ancho, px // ancho
+        x0, x1, y0, y1 = int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
+        cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
         detecciones.append(ObjetoPercibido(
-            nombre=nombre, categoria=categoria, centro_x=cx, centro_y=cy,
-            bearing_rad=bearing, distancia_m=float(np.median(validas)),
-            pixeles=len(xs), x_min=int(xs.min()), x_max=int(xs.max()),
-            y_min=int(ys.min()), y_max=int(ys.max())))
+            nombre=nombres[geom_id], categoria=categorias[geom_id],
+            centro_x=float(cx), centro_y=float(cy),
+            bearing_rad=math.atan2(cx - (ancho - 1) / 2.0, focal_px),
+            distancia_m=float(np.median(validas)),
+            pixeles=int(b - a), x_min=x0, x_max=x1, y_min=y0, y_max=y1))
     return detecciones
 
 

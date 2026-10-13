@@ -1139,6 +1139,7 @@
       },
       {
         "tipo": "bandera",
+        "textura": "argentina",
         "celda": [
           1,
           14
@@ -1146,6 +1147,7 @@
       },
       {
         "tipo": "bandera",
+        "textura": "uade",
         "celda": [
           1,
           17

@@ -21,7 +21,7 @@ para elegir otro mapa.
 
 La misión dibuja un patio universitario inspirado en la explanada UADE de las
 referencias: explanada embaldosada, jardines, maceteros, árboles, bancos,
-asientos, farolas, banderas, pérgola y edificios con ventanales y balcones. El
+asientos, farolas, banderas con textura, pérgola y edificios con ventanales y balcones. El
 mapa mide 32 x 24 m y contiene 43 piezas de mobiliario/obstáculos decoradas,
 más una persona móvil. Estas construcciones se generan como geometría MuJoCo;
 no reemplazan el XML oficial del Go2 ni necesitan texturas externas. El Go2
@@ -87,6 +87,34 @@ como festejo, si la cámara no detecta personas u objetos próximos. Es una
 animación de pose: no es una acrobacia dinámica ni envía la orden SportClient
 `Backflip` al Go2 físico. La locomoción sigue siendo cinemática, por lo que no
 valida equilibrio ni sim-to-real.
+
+## Banderas
+
+Cada objeto `bandera` del mapa JSON puede indicar `"textura": "<nombre>"`; se
+carga `entorno/sim/assets/banderas/bandera_<nombre>.png` (proporción 14:9, tela
+de 1,26 x 0,81 m sin colisión, a 3,3 m del piso). Si el archivo no existe, se
+avisa y se dibuja tela lisa.
+
+- `argentina`: tres franjas iguales (celeste, blanca, celeste) y Sol de Mayo de
+  32 rayos. Vectores de `flag-icons` 7.5.0 (MIT; ver `LICENCIA_flag-icons.txt`),
+  recompuestos en 14:9 en `bandera_argentina.svg`.
+- `uade`: escudo oficial aportado por la autora (`escudo_uade_original.png`,
+  300 x 300 px) centrado sobre paño blanco 14:9, sin deformarlo. El color del
+  paño es una suposición; si la bandera institucional usa otro, reemplazar
+  `bandera_uade.png` (idealmente con el escudo en SVG o mayor resolución).
+
+## Iluminación y entorno
+
+Para los mapas de parque, `crear_escena` aplica ajustes solo visuales
+(`_AJUSTES_VISUALES`): sol inclinado con sombras, cielo claro, neblina suave y
+suelo exterior verde sin reflejos. No cambian colisiones, coordenadas ni la
+percepción (segmentación y profundidad no dependen de la luz).
+
+## Mediciones reproducibles
+
+Desde `entorno`: `python herramientas/bench_percepcion.py` (tiempo de captura y
+detección por cuadro) y `python -u herramientas/e2e_mision_sin_ventana.py 235`
+(misión completa sin ventana). Ver el docstring de cada script.
 
 ## Pruebas
 
