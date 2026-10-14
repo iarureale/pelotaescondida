@@ -34,7 +34,8 @@ class CamaraGo2Tests(unittest.TestCase):
         self.assertLess(persona.bearing_rad, 0)
 
     def test_preview_publica_png_y_anota_cajas(self):
-        vista = VistaCamaraTk()
+        # factor=1: sin reducción (por defecto la vista se muestra a la mitad).
+        vista = VistaCamaraTk(factor=1)
         vista._activa = True
         frame = np.zeros((20, 30, 3), dtype=np.uint8)
         objeto = ObjetoPercibido("nav_target_ball", "pelota", 10, 10,

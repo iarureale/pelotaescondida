@@ -211,6 +211,42 @@ def detectar_objetos_segmentados(segmentacion, profundidad, model, mujoco,
     return detecciones
 
 
+def validar_pelota_con_rgb(detecciones, rgb, diametro_m: float = 0.20,
+                           fovy_deg: float = 60.0):
+    """Descarta "pelotas" de la segmentación que la imagen RGB no respalda.
+
+    La segmentación decodifica el ID de geometría desde un buffer de color. En
+    algunas GPU/drivers los bordes de objetos cercanos (p. ej. el propio cuerpo
+    del Go2) salen mezclados y pueden decodificar exactamente el ID de la
+    pelota: una "pelota" falsa a pocos centímetros de la cámara. La pelota real
+    es una esfera roja de 0,20 m, así que se exige (1) píxeles rojos dentro de
+    su caja y (2) que el diámetro aparente sea coherente con la profundidad.
+    Devuelve (detecciones_validas, cantidad_descartada).
+    """
+    import numpy as np
+
+    imagen = np.asarray(rgb)
+    alto = imagen.shape[0]
+    focal_px = alto / (2.0 * math.tan(math.radians(fovy_deg) / 2.0))
+    validas, descartadas = [], 0
+    for obj in detecciones:
+        if obj.categoria != "pelota":
+            validas.append(obj)
+            continue
+        caja = imagen[obj.y_min:obj.y_max + 1, obj.x_min:obj.x_max + 1, :3]
+        caja = caja.astype(np.int16, copy=False)
+        r, g, b = caja[:, :, 0], caja[:, :, 1], caja[:, :, 2]
+        rojos = int(np.count_nonzero((r > 120) & (r > g * 1.3) & (r > b * 1.3)))
+        diametro_px = ((obj.x_max - obj.x_min + 1) + (obj.y_max - obj.y_min + 1)) / 2.0
+        esperado_m = diametro_m * focal_px / max(1.0, diametro_px)
+        coherente = 0.5 <= esperado_m / max(1e-6, obj.distancia_m) <= 2.0
+        if rojos >= max(3, 0.2 * obj.pixeles) and coherente:
+            validas.append(obj)
+        else:
+            descartadas += 1
+    return validas, descartadas
+
+
 def _categoria_geometria(nombre: str | None) -> str | None:
     if not nombre:
         return None
@@ -275,8 +311,15 @@ class SeguidorPelota:
 class VistaCamaraTk:
     """Vista auxiliar opcional; usa Tkinter estándar y recibe el último frame."""
 
-    def __init__(self):
+    # La captura y la detección siguen a 640x480; solo se achica lo que se
+    # MUESTRA (factor 2 -> 320x240). Menos píxeles que codificar a PNG en el
+    # hilo del visor por cada cuadro y una ventana más chica en pantalla.
+    FACTOR_VISTA = 2
+    MAX_DETALLES = 4          # detecciones más cercanas escritas en la barra
+
+    def __init__(self, factor: int | None = None):
         import queue
+        self.factor = max(1, int(factor or self.FACTOR_VISTA))
         self._queue = queue.Queue(maxsize=1)
         self._thread = None
         self._activa = False
@@ -296,10 +339,12 @@ class VistaCamaraTk:
             import tkinter as tk
             root = tk.Tk()
             root.title("Go2 — cámara simulada")
-            root.geometry("680x550")
+            ancho_vista, alto_vista = 640 // self.factor, 480 // self.factor
+            root.geometry(f"{ancho_vista + 20}x{alto_vista + 90}")
             label = tk.Label(root, text="Esperando imagen de la cámara")
             label.pack(fill="both", expand=True)
-            estado = tk.Label(root, text="", anchor="w", justify="left")
+            estado = tk.Label(root, text="", anchor="w", justify="left",
+                              wraplength=ancho_vista)
             estado.pack(fill="x")
 
             def actualizar():
@@ -348,11 +393,13 @@ class VistaCamaraTk:
             if x1 < x0 or y1 < y0:
                 continue
             color = colores.get(deteccion.categoria, (255, 255, 255))
-            grosor = 2
+            grosor = 2 * self.factor     # queda de 2 px tras reducir
             imagen[y0:min(y0 + grosor, y1 + 1), x0:x1 + 1] = color
             imagen[max(y1 - grosor + 1, y0):y1 + 1, x0:x1 + 1] = color
             imagen[y0:y1 + 1, x0:min(x0 + grosor, x1 + 1)] = color
             imagen[y0:y1 + 1, max(x1 - grosor + 1, x0):x1 + 1] = color
+        if self.factor > 1:
+            imagen = np.ascontiguousarray(imagen[::self.factor, ::self.factor])
         alto, ancho = imagen.shape[:2]
         filas = b"".join(b"\x00" + imagen[fila].tobytes()
                          for fila in range(alto))
@@ -365,7 +412,7 @@ class VistaCamaraTk:
         png = (b"\x89PNG\r\n\x1a\n"
                + chunk(b"IHDR", struct.pack(">IIBBBBB", ancho, alto, 8, 2,
                                                0, 0, 0))
-               + chunk(b"IDAT", zlib.compress(filas))
+               + chunk(b"IDAT", zlib.compress(filas, 1))
                + chunk(b"IEND", b""))
         contenido = base64.b64encode(png).decode("ascii")
         try:
@@ -373,8 +420,10 @@ class VistaCamaraTk:
         except Exception:
             pass
         try:
+            cercanas = sorted(detecciones, key=lambda d: d.distancia_m)
             detalle = ", ".join(
-                f"{d.categoria} {d.distancia_m:.1f} m" for d in detecciones)
+                f"{d.categoria} {d.distancia_m:.1f} m"
+                for d in cercanas[:self.MAX_DETALLES])
             texto = " | ".join(part for part in (estado, detalle) if part)
             self._queue.put_nowait((contenido, texto))
         except Exception:

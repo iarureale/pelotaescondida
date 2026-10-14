@@ -465,9 +465,17 @@ class SimuladorOficial:
                 from .camara_go2 import VistaCamaraTk
                 self.vista_camara = VistaCamaraTk()
                 self.vista_camara.iniciar()
-            from .camara_go2 import DeteccionPelota, detectar_objetos_segmentados
-            self.ultima_percepcion = detectar_objetos_segmentados(
+            from .camara_go2 import (DeteccionPelota, detectar_objetos_segmentados,
+                                     validar_pelota_con_rgb)
+            percibidas = detectar_objetos_segmentados(
                 segmentacion, profundidad, self.model, self.mj)
+            self.ultima_percepcion, descartadas = validar_pelota_con_rgb(
+                percibidas, frame)
+            if descartadas:
+                self._pelotas_descartadas = getattr(self, "_pelotas_descartadas", 0) + descartadas
+                if self._pelotas_descartadas in (1, 10, 100, 1000):
+                    print(f"\n  [CAMARA] Pelota de la segmentación descartada por no "
+                          f"coincidir con la imagen RGB (total {self._pelotas_descartadas}).")
             if self.mision is not None:
                 estado = self.mision.paso(self.ultima_percepcion)
                 estado_mostrar = f"MISION: {estado}"
