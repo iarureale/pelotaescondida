@@ -23,16 +23,17 @@ La misión dibuja un patio universitario inspirado en la explanada UADE de las
 referencias: explanada embaldosada, jardines, maceteros, árboles, bancos,
 asientos, farolas, banderas con textura, pérgola y edificios con ventanales y balcones. El
 mapa mide 32 x 24 m y contiene 43 piezas de mobiliario/obstáculos decoradas,
-más una persona móvil. Estas construcciones se generan como geometría MuJoCo;
+más cuatro personas sentadas en bancos (solo ambientación). Estas construcciones se generan como geometría MuJoCo;
 no reemplazan el XML oficial del Go2 ni necesitan texturas externas. El Go2
 recorre sectores de búsqueda conocidos con A*, evitando los obstáculos que
 figuran en el mapa. La celda de la pelota se usa para colocarla en la escena,
 pero no se entrega al planificador. La cámara debe observarla para iniciar el
 seguimiento. El escenario restringe la confirmación de candidatos a partir del
 sector de búsqueda configurado; las etiquetas aisladas fuera de esa zona no
-interrumpen la ruta A*. Hay además una persona animada: si aparece a menos de 1 m, el robot
-se detiene; las detecciones más lejanas se incorporan como celdas ocupadas
-temporales y pueden provocar una replanificación.
+interrumpen la ruta A*. El patio UADE ya no tiene persona móvil. Los mapas
+`parque_go2_*` conservan la persona animada: si aparece a menos de 1 m, el
+robot se detiene; las detecciones más lejanas se incorporan como celdas
+ocupadas temporales y pueden provocar una replanificación.
 
 Los estados y sus motivos se imprimen en la terminal. Al terminar, también se
 muestran distancia recorrida, replans, detecciones, obstáculos evitados,
@@ -44,6 +45,26 @@ celdas de 1 m. Para una marcha rápida, el modo de navegación autónoma local
 permite hasta 3.0 m/s, con giros de hasta 2.0 rad/s. A* conserva la ruta de
 celdas para dibujarla, pero el controlador condensa los tramos rectos y solo
 frena para las esquinas. La velocidad baja al aproximarse al objetivo.
+
+## Seguimiento de ruta, pelota y reinicio
+
+- **Seguidor (`navegador_astar.py`).** Sigue cada tramo con un punto de mira
+  (0,8 m) sobre la línea de la grilla: no corta esquinas en diagonal. Avanza
+  mientras corrige el rumbo y solo gira en el sitio con error > 0,9 rad.
+  Aceleración lineal limitada a 1,5 m/s² y angular a 5 rad/s²; frena para las
+  esquinas y para el destino. Si no progresa 0,2 m en 6 s, informa `atascado`
+  y la misión replanifica. Se ejecuta en cada ciclo del visor (`control()`),
+  separado de la captura de cámara.
+- **Pelota.** Una pelota a más de 2,5 m se acepta tras 4 cuadros consecutivos y
+  se alcanza con A* (estado `APROXIMANDO_PELOTA`); más cerca se usa la
+  aproximación final reactiva. Si se tapa, el robot sigue hacia la última
+  posición estimada y, tras 8 s sin verla, retoma los waypoints. Antes
+  perseguía en línea recta y oscilaba entre buscar y perseguir.
+- **Replanificación.** Solo ante personas detectadas, atasco o cambio de objetivo
+  (antes, cada 0,5 s).
+- **Reinicio.** Tecla **R** en la ventana 3D: el Go2 vuelve al inicio y repite el
+  recorrido. El mundo es determinista, así que la trayectoria es idéntica.
+- **Cámara 3D.** Seguimiento suavizado a 6 m; la rueda del mouse acerca o aleja.
 
 ## Modos por separado
 
@@ -65,8 +86,8 @@ geometría. La pelota y los objetos del escenario se reconocen por la etiqueta d
 su geometría, no por un modelo general de visión artificial. Distancia y
 bearing se estiman desde píxeles visibles y depth. La posición del robot para
 A* proviene de `Mundo` (ground truth del simulador), no de odometría ni SLAM.
-La persona se mueve por una trayectoria definida en el JSON; no es una persona
-detectada mediante una red neuronal.
+Las personas animadas de los mapas `parque_go2_*` siguen una trayectoria del JSON;
+no se detectan con una red neuronal.
 
 La locomoción del paquete es cinemática: integra comandos de velocidad, escribe
 la pose en MuJoCo y anima las patas. No ejecuta `mj_step` ni un controlador de
@@ -111,6 +132,11 @@ suelo exterior verde sin reflejos. No cambian colisiones, coordenadas ni la
 percepción (segmentación y profundidad no dependen de la luz).
 
 ## Mediciones reproducibles
+
+`python -u herramientas/e2e_reloj_virtual.py 120 2` corre la misión sin ventana
+con reloj virtual (resultado independiente de la CPU), repite con reinicio y
+reporta repetibilidad, colisiones y despeje. `SIN_PELOTA=1` oculta la pelota a
+la cámara para recorrer toda la ruta de búsqueda.
 
 Desde `entorno`: `python herramientas/bench_percepcion.py` (tiempo de captura y
 detección por cuadro) y `python -u herramientas/e2e_mision_sin_ventana.py 235`

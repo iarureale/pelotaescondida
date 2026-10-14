@@ -122,12 +122,12 @@
       0,
       1,
       0,
+      1,
       0,
       0,
       0,
       0,
-      0,
-      0,
+      1,
       0,
       0,
       0,
@@ -190,12 +190,12 @@
       0,
       0,
       0,
+      1,
       0,
       0,
       0,
       0,
-      0,
-      0,
+      1,
       1,
       0,
       0,
@@ -836,33 +836,6 @@
       4,
       27
     ],
-    "personas": [
-      {
-        "celda": [
-          20,
-          5
-        ],
-        "trayectoria": [
-          [
-            20,
-            5
-          ],
-          [
-            19,
-            5
-          ],
-          [
-            18,
-            5
-          ],
-          [
-            18,
-            7
-          ]
-        ],
-        "loop": true
-      }
-    ],
     "objetos": [
       {
         "tipo": "arbol",
@@ -1166,6 +1139,34 @@
           17,
           17
         ]
+      },
+      {
+        "tipo": "columna",
+        "celda": [
+          3,
+          18
+        ]
+      },
+      {
+        "tipo": "columna",
+        "celda": [
+          5,
+          18
+        ]
+      },
+      {
+        "tipo": "columna",
+        "celda": [
+          3,
+          23
+        ]
+      },
+      {
+        "tipo": "columna",
+        "celda": [
+          5,
+          23
+        ]
       }
     ],
     "busqueda": [
@@ -1191,6 +1192,36 @@
       ]
     ],
     "detectar_pelota_desde_waypoint": 0,
-    "escaneo_duracion_s": 4.0
+    "escaneo_duracion_s": 4.0,
+    "personas_sentadas": [
+      {
+        "celda": [
+          3,
+          16
+        ],
+        "variante": 0
+      },
+      {
+        "celda": [
+          9,
+          4
+        ],
+        "variante": 1
+      },
+      {
+        "celda": [
+          10,
+          27
+        ],
+        "variante": 2
+      },
+      {
+        "celda": [
+          16,
+          14
+        ],
+        "variante": 3
+      }
+    ]
   }
 }

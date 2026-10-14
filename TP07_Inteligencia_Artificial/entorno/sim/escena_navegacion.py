@@ -39,8 +39,13 @@ def crear_escena(base_xml: str, mapa, incluir_bola: bool = False) -> tuple[str, 
         scene_xml = archivo.read()
     # Mejora la resolución offscreen del visor y de la cámara del robot sin
     # modificar la escena limpia ni los modelos oficiales.
+    # znear mayor (0,05·extent) y zfar acotado: con znear=0,01·extent el buffer
+    # de profundidad de 24 bits no resolvía las capas del piso (2-4 mm entre
+    # baldosas, juntas y césped) a 15-30 m y parpadeaban. Menos "haze" para que
+    # el fondo no se lave a esa misma distancia.
     scene_xml = scene_xml.replace(
-        "<visual>", '<visual>\n    <quality shadowsize="2048"/>', 1)
+        "<visual>", '<visual>\n    <quality shadowsize="4096"/>\n'
+        '    <map znear="0.05" zfar="150" haze="0.12"/>', 1)
     scene_xml = scene_xml.replace(
         '<global azimuth="-130" elevation="-20"/>',
         '<global azimuth="-132" elevation="-24" offwidth="1280" '
@@ -84,6 +89,7 @@ def crear_escena(base_xml: str, mapa, incluir_bola: bool = False) -> tuple[str, 
             'contype="0" conaffinity="0"/>')
     obstaculos.extend(_superficies_escenario(mapa, escenario))
     obstaculos.extend(_personas_mjcf(mapa, escenario))
+    obstaculos.extend(_personas_sentadas_mjcf(mapa, escenario))
     cierre = scene_xml.rfind("</worldbody>")
     if cierre < 0:
         for temporal in temporales:
@@ -166,17 +172,20 @@ def _geometria_decorado(mapa, objeto: dict, celda: tuple[int, int],
     solido = 'contype="1" conaffinity="1"'
     sin_colision = 'contype="0" conaffinity="0"'
     if tipo == "arbol":
+        # Escala de las fotos: árboles de ~3 m en grandes macetas redondas.
         return [
-            f'<geom name="{nombre}_tronco" type="cylinder" size="0.12 0.48" '
-            f'pos="{x} {y} 0.50" rgba="0.34 0.18 0.08 1" {solido}/>',
-            f'<geom name="{nombre}_copa" type="sphere" size="0.46" '
-            f'pos="{x} {y} 1.16" rgba="0.10 0.34 0.13 1" {sin_colision}/>',
-            f'<geom name="{nombre}_copa_alta" type="sphere" size="0.31" '
-            f'pos="{x - 0.19} {y + 0.08} 1.44" '
-            f'rgba="0.16 0.42 0.17 1" {sin_colision}/>',
-            f'<geom name="{nombre}_copa_lateral" type="sphere" size="0.30" '
-            f'pos="{x + 0.22} {y - 0.08} 1.34" '
-            f'rgba="0.13 0.38 0.15 1" {sin_colision}/>',
+            f'<geom name="{nombre}_maceta" type="cylinder" size="0.36 0.19" '
+            f'pos="{x} {y} 0.20" rgba="0.27 0.20 0.15 1" {solido}/>',
+            f'<geom name="{nombre}_tronco" type="cylinder" size="0.07 0.95" '
+            f'pos="{x} {y} 1.02" rgba="0.34 0.20 0.10 1" {solido}/>',
+            f'<geom name="{nombre}_copa" type="sphere" size="0.62" '
+            f'pos="{x} {y} 2.25" rgba="0.14 0.42 0.16 1" {sin_colision}/>',
+            f'<geom name="{nombre}_copa_alta" type="sphere" size="0.42" '
+            f'pos="{x - 0.25} {y + 0.10} 2.78" '
+            f'rgba="0.22 0.52 0.20 1" {sin_colision}/>',
+            f'<geom name="{nombre}_copa_lateral" type="sphere" size="0.40" '
+            f'pos="{x + 0.30} {y - 0.10} 2.55" '
+            f'rgba="0.18 0.47 0.18 1" {sin_colision}/>',
         ]
     if tipo == "arbusto":
         return [f'<geom name="{nombre}" type="sphere" size="0.34" '
@@ -194,14 +203,25 @@ def _geometria_decorado(mapa, objeto: dict, celda: tuple[int, int],
             f'rgba="0.17 0.17 0.18 1" {solido}/>',
         ]
     if tipo == "poste":
+        # Farola negra de ~3,6 m con pantalla cuadrada y globo de luz.
         return [
-            f'<geom name="{nombre}_base" type="cylinder" size="0.07 0.75" '
-            f'pos="{x} {y} 0.78" rgba="0.18 0.20 0.22 1" {solido}/>',
-            f'<geom name="{nombre}_luz" type="sphere" size="0.14" '
-            f'pos="{x} {y} 1.58" rgba="0.96 0.83 0.40 1" {sin_colision}/>',
-            f'<geom name="{nombre}_brazo" type="capsule" '
-            f'fromto="{x} {y} 1.42 {x + 0.22} {y} 1.57" size="0.035" '
-            f'rgba="0.18 0.20 0.22 1" {solido}/>',
+            f'<geom name="{nombre}_base" type="cylinder" size="0.07 1.70" '
+            f'pos="{x} {y} 1.72" rgba="0.12 0.12 0.13 1" {solido}/>',
+            f'<geom name="{nombre}_zocalo" type="box" size="0.16 0.16 0.04" '
+            f'pos="{x} {y} 0.05" rgba="0.12 0.12 0.13 1" {sin_colision}/>',
+            f'<geom name="{nombre}_pantalla" type="box" size="0.30 0.30 0.05" '
+            f'pos="{x} {y} 3.52" rgba="0.14 0.14 0.15 1" {sin_colision}/>',
+            f'<geom name="{nombre}_luz" type="sphere" size="0.17" '
+            f'pos="{x} {y} 3.36" rgba="0.97 0.93 0.78 1" {sin_colision}/>',
+        ]
+    if tipo == "columna":
+        # Pilar de la pérgola: sólido y presente en la grilla (antes era solo
+        # decorativo y la ruta de búsqueda lo atravesaba).
+        return [
+            f'<geom name="{nombre}_fuste" type="cylinder" size="0.11 1.50" '
+            f'pos="{x} {y} 1.50" rgba="0.76 0.75 0.68 1" {solido}/>',
+            f'<geom name="{nombre}_base" type="cylinder" size="0.17 0.05" '
+            f'pos="{x} {y} 0.05" rgba="0.62 0.61 0.56 1" {sin_colision}/>',
         ]
     if tipo == "valla":
         return [
@@ -222,19 +242,19 @@ def _geometria_decorado(mapa, objeto: dict, celda: tuple[int, int],
         ]
     if tipo == "macetero":
         return [
-            f'<geom name="{nombre}_base" type="box" size="0.43 0.43 0.22" '
-            f'pos="{x} {y} 0.23" rgba="0.70 0.67 0.59 1" {solido}/>'] + [
+            f'<geom name="{nombre}_base" type="box" size="0.43 0.43 0.30" '
+            f'pos="{x} {y} 0.30" rgba="0.80 0.79 0.74 1" {solido}/>'] + [
             f'<geom name="{nombre}_planta_{i}" type="sphere" size="0.28" '
             f'pos="{x + dx:.3f} {y + dy:.3f} {z:.3f}" '
             f'rgba="{color} 1" {sin_colision}/>'
             for i, (dx, dy, z, color) in enumerate((
-                (-0.18, 0.0, 0.70, "0.16 0.39 0.19"),
-                (0.12, 0.08, 0.76, "0.22 0.48 0.22"),
-                (0.0, -0.15, 0.82, "0.13 0.33 0.17"))) ]
+                (-0.18, 0.0, 0.85, "0.16 0.39 0.19"),
+                (0.12, 0.08, 0.92, "0.22 0.48 0.22"),
+                (0.0, -0.15, 0.98, "0.13 0.33 0.17"))) ]
     if tipo == "asiento_moderno":
         return [
-            f'<geom name="{nombre}_base" type="ellipsoid" size="0.46 0.39 0.22" '
-            f'pos="{x} {y} 0.24" rgba="0.91 0.91 0.87 1" {solido}/>']
+            f'<geom name="{nombre}_base" type="ellipsoid" size="0.42 0.40 0.31" '
+            f'pos="{x} {y} 0.31" rgba="0.96 0.96 0.94 1" {solido}/>']
     if tipo == "mesa":
         return [
             f'<geom name="{nombre}_tapa" type="cylinder" size="0.38 0.045" '
@@ -306,14 +326,14 @@ def _superficies_patio(mapa, ancho, alto, cx, cy) -> list[str]:
                       f'0.012 0.002" pos="{cx:.3f} {y:.3f} 0.020" '
                       'rgba="0.48 0.49 0.47 1" contype="0" conaffinity="0"/>')
     piezas.extend([
-        f'<geom name="uade_jardin_oeste" type="box" size="2.15 {alto * .44:.3f} 0.008" '
-        f'pos="{cx - ancho * .35:.3f} {cy:.3f} 0.012" rgba="0.26 0.43 0.22 1" '
+        f'<geom name="uade_jardin_oeste" type="box" size="2.15 {alto * .44:.3f} 0.012" '
+        f'pos="{cx - ancho * .35:.3f} {cy:.3f} 0.020" rgba="0.26 0.43 0.22 1" '
         'contype="0" conaffinity="0"/>',
-        f'<geom name="uade_jardin_este" type="box" size="1.65 {alto * .36:.3f} 0.008" '
-        f'pos="{cx + ancho * .36:.3f} {cy + alto * .02:.3f} 0.012" '
+        f'<geom name="uade_jardin_este" type="box" size="1.65 {alto * .36:.3f} 0.012" '
+        f'pos="{cx + ancho * .36:.3f} {cy + alto * .02:.3f} 0.020" '
         'rgba="0.28 0.45 0.23 1" contype="0" conaffinity="0"/>',
-        f'<geom name="uade_cesped_central" type="box" size="3.3 2.2 0.008" '
-        f'pos="{cx:.3f} {cy + alto * .23:.3f} 0.012" rgba="0.32 0.50 0.25 1" '
+        f'<geom name="uade_cesped_central" type="box" size="3.3 2.2 0.012" '
+        f'pos="{cx:.3f} {cy + alto * .23:.3f} 0.020" rgba="0.32 0.50 0.25 1" '
         'contype="0" conaffinity="0"/>',
     ])
     piezas.extend(_arquitectura_patio(ancho, alto, cx, cy))
@@ -332,34 +352,50 @@ def _arquitectura_patio(ancho: float, alto: float, cx: float, cy: float) -> list
         g.append(f'<geom name="uade_edificio_{lado}" type="box" size="{sx:.2f} {sy:.2f} 4.2" '
                  f'pos="{x:.2f} {y:.2f} 4.2" rgba="0.72 0.74 0.72 1" '
                  'contype="0" conaffinity="0"/>')
-        if lado == "norte":
-            for piso, z in enumerate((1.35, 2.75, 4.15, 5.55, 6.95)):
-                g.append(f'<geom name="uade_frente_faja_{piso}" type="box" '
-                         f'size="{sx * .98:.2f} 0.035 0.055" pos="{x:.2f} {y - sy - .04:.2f} '
-                         f'{z:.2f}" rgba="0.25 0.29 0.31 1" contype="0" conaffinity="0"/>')
-                for columna in range(1, max(2, int(ancho // 2))):
-                    wx = x - ancho / 2 + columna * 2.0
-                    g.append(f'<geom name="uade_ventana_{piso}_{columna}" type="box" '
-                             f'size="0.72 0.025 0.43" pos="{wx:.2f} {y - sy - .07:.2f} '
-                             f'{z + .48:.2f}" rgba="0.12 0.24 0.34 1" contype="0" conaffinity="0"/>')
-                    g.append(f'<geom name="uade_balcon_{piso}_{columna}" type="box" '
-                             f'size="0.78 0.22 0.045" pos="{wx:.2f} {y - sy - .22:.2f} '
-                             f'{z - .08:.2f}" rgba="0.37 0.40 0.39 1" contype="0" conaffinity="0"/>')
+        # Ventanales, balcones y franjas de color en las tres fachadas (antes
+        # solo la norte los tenía y las otras dos eran bloques lisos).
+        franjas = {1: "0.55 0.45 0.70", 3: "0.35 0.62 0.58"}   # lila / verde agua
+        for piso, z in enumerate((1.35, 2.75, 4.15, 5.55, 6.95)):
+            if lado == "norte":
+                largo, centro, cara = ancho + 5.0, x, y - sy - .04
+            else:
+                largo, centro = alto + 5.0, y
+                cara = x - sx - .04 if lado == "este" else x + sx + .04
+            sentido = 1 if lado != "oeste" else -1
+            horizontal = lado == "norte"
+            tam_faja = (f"{largo / 2 * .98:.2f} 0.035 0.055" if horizontal
+                        else f"0.035 {largo / 2 * .98:.2f} 0.055")
+            pos_faja = (f"{centro:.2f} {cara:.2f} {z:.2f}" if horizontal
+                        else f"{cara:.2f} {centro:.2f} {z:.2f}")
+            color_faja = franjas.get(piso, "0.25 0.29 0.31")
+            g.append(f'<geom name="uade_{lado}_faja_{piso}" type="box" size="{tam_faja}" '
+                     f'pos="{pos_faja}" rgba="{color_faja} 1" contype="0" conaffinity="0"/>')
+            paso_v, n = 2.0, int(largo // 2.0)
+            for k in range(1, n):
+                off = -largo / 2 + k * paso_v
+                if horizontal:
+                    tv, pv = "0.72 0.025 0.43", (centro + off, cara - .03, z + .48)
+                    tb, pb = "0.78 0.22 0.045", (centro + off, cara - .18, z - .08)
+                else:
+                    tv, pv = "0.025 0.72 0.43", (cara - sentido * .03, centro + off, z + .48)
+                    tb, pb = "0.22 0.78 0.045", (cara - sentido * .18, centro + off, z - .08)
+                g.append(f'<geom name="uade_{lado}_ventana_{piso}_{k}" type="box" size="{tv}" '
+                         f'pos="{pv[0]:.2f} {pv[1]:.2f} {pv[2]:.2f}" rgba="0.12 0.24 0.34 1" '
+                         'contype="0" conaffinity="0"/>')
+                g.append(f'<geom name="uade_{lado}_balcon_{piso}_{k}" type="box" size="{tb}" '
+                         f'pos="{pb[0]:.2f} {pb[1]:.2f} {pb[2]:.2f}" rgba="0.37 0.40 0.39 1" '
+                         'contype="0" conaffinity="0"/>')
     # Pérgola peatonal, como la galería de las fotos, sobre un lateral.
-    px, py = cx + ancho * .22, cy + alto * .31
-    g.append(f'<geom name="uade_pergola_techo" type="box" size="5.0 1.65 0.10" '
+    px, py = cx + ancho * .156, cy + alto * .31   # entre las columnas 18 y 23
+    g.append(f'<geom name="uade_pergola_techo" type="box" size="4.6 1.65 0.10" '
              f'pos="{px:.2f} {py:.2f} 3.0" rgba="0.83 0.82 0.74 1" '
              'contype="0" conaffinity="0"/>')
     for i in range(9):
-        xx = px - 4.5 + i * 1.125
+        xx = px - 4.4 + i * 1.1
         g.append(f'<geom name="uade_pergola_viga_{i}" type="box" size="0.055 1.75 0.065" '
                  f'pos="{xx:.2f} {py:.2f} 3.18" rgba="0.84 0.83 0.75 1" '
                  'contype="0" conaffinity="0"/>')
-    for i, xx in enumerate((px - 4.5, px + 4.5)):
-        for j, yy in enumerate((py - 1.35, py + 1.35)):
-            g.append(f'<geom name="uade_pergola_pilar_{i}_{j}" type="cylinder" '
-                     f'size="0.10 1.45" pos="{xx:.2f} {yy:.2f} 1.48" '
-                     'rgba="0.76 0.75 0.68 1" contype="0" conaffinity="0"/>')
+    # Los pilares son objetos "columna" del mapa (colisión real); ver _geometria_decorado.
     return g
 
 
@@ -381,6 +417,71 @@ def _personas_mjcf(mapa, escenario: dict) -> list[str]:
             'pos="0 0 1.29" rgba="0.80 0.63 0.48 1" '
             'contype="1" conaffinity="1"/></body>')
     return resultado
+
+
+# (camisa, pantalón, piel, pelo) de cada variante de persona sentada.
+_VARIANTES_PERSONA = (
+    ("0.15 0.15 0.17", "0.12 0.14 0.20", "0.85 0.68 0.55", "0.16 0.10 0.07"),
+    ("0.84 0.84 0.80", "0.20 0.28 0.45", "0.62 0.45 0.34", "0.07 0.06 0.06"),
+    ("0.30 0.52 0.34", "0.30 0.28 0.25", "0.92 0.76 0.64", "0.45 0.30 0.14"),
+    ("0.70 0.30 0.28", "0.10 0.10 0.12", "0.75 0.58 0.45", "0.10 0.08 0.06"),
+)
+
+
+def _personas_sentadas_mjcf(mapa, escenario: dict) -> list[str]:
+    """Personas estáticas sentadas sobre bancos del mapa (solo ambientación).
+
+    Cada entrada de ``personas_sentadas`` apunta a la celda de un ``banco``.
+    La geometría no tiene colisión y su nombre (``deco_persona_*``) no entra en
+    la segmentación como "persona": no detiene al Go2 ni cambia la
+    planificación. El banco (y su celda ocupada en la grilla) ya bloquea el
+    paso; las piernas llegan a ~0,5 m del centro del banco, dentro del margen
+    de seguridad de A* (ver test_personas_sentadas_no_invaden_la_ruta).
+    Medidas: asiento a 0,48 m, torso y cabeza hasta ~1,30 m (adulto sentado).
+    El banco mira hacia -y (el respaldo está en +y).
+    """
+    bancos = {tuple(o["celda"]) for o in escenario.get("objetos", [])
+              if o.get("tipo") == "banco"}
+    geoms = []
+    for i, persona in enumerate(escenario.get("personas_sentadas", [])):
+        celda = tuple(persona["celda"])
+        if celda not in bancos:
+            raise ValueError(f"personas_sentadas[{i}]: la celda {list(celda)} "
+                             "no tiene un banco.")
+        camisa, pantalon, piel, pelo = _VARIANTES_PERSONA[
+            int(persona.get("variante", i)) % len(_VARIANTES_PERSONA)]
+        x, y = mapa.a_mundo(*celda)
+        n = f"deco_persona_{i}"
+        nc = 'contype="0" conaffinity="0"'
+        for lado, dx in (("izq", -0.09), ("der", 0.09)):
+            geoms += [
+                f'<geom name="{n}_muslo_{lado}" type="capsule" '
+                f'fromto="{x + dx:.3f} {y - 0.08:.3f} 0.56 {x + dx:.3f} {y - 0.40:.3f} 0.56" '
+                f'size="0.075" rgba="{pantalon} 1" {nc}/>',
+                f'<geom name="{n}_pierna_{lado}" type="capsule" '
+                f'fromto="{x + dx:.3f} {y - 0.42:.3f} 0.52 {x + dx:.3f} {y - 0.43:.3f} 0.10" '
+                f'size="0.06" rgba="{pantalon} 1" {nc}/>',
+                f'<geom name="{n}_pie_{lado}" type="box" size="0.05 0.11 0.04" '
+                f'pos="{x + dx:.3f} {y - 0.50:.3f} 0.04" rgba="0.10 0.10 0.11 1" {nc}/>',
+                f'<geom name="{n}_brazo_{lado}" type="capsule" '
+                f'fromto="{x + 2.3 * dx:.3f} {y - 0.08:.3f} 1.02 {x + 2.3 * dx:.3f} {y - 0.10:.3f} 0.74" '
+                f'size="0.045" rgba="{camisa} 1" {nc}/>',
+                f'<geom name="{n}_antebrazo_{lado}" type="capsule" '
+                f'fromto="{x + 2.3 * dx:.3f} {y - 0.10:.3f} 0.74 {x + 1.3 * dx:.3f} {y - 0.30:.3f} 0.64" '
+                f'size="0.04" rgba="{piel} 1" {nc}/>',
+            ]
+        geoms += [
+            f'<geom name="{n}_torso" type="capsule" '
+            f'fromto="{x:.3f} {y - 0.08:.3f} 0.62 {x:.3f} {y - 0.06:.3f} 1.00" '
+            f'size="0.155" rgba="{camisa} 1" {nc}/>',
+            f'<geom name="{n}_cuello" type="cylinder" size="0.05 0.05" '
+            f'pos="{x:.3f} {y - 0.07:.3f} 1.20" rgba="{piel} 1" {nc}/>',
+            f'<geom name="{n}_cabeza" type="sphere" size="0.105" '
+            f'pos="{x:.3f} {y - 0.07:.3f} 1.31" rgba="{piel} 1" {nc}/>',
+            f'<geom name="{n}_pelo" type="sphere" size="0.108" '
+            f'pos="{x:.3f} {y - 0.045:.3f} 1.34" rgba="{pelo} 1" {nc}/>',
+        ]
+    return geoms
 
 
 def limpiar_escena(temporales: list[str]) -> None:

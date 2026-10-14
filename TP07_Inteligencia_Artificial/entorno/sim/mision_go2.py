@@ -16,6 +16,15 @@ BACKFLIP_CINEMATICO_DISPONIBLE = True
 class MisionParque:
     """Explora waypoints conocidos; la celda de la pelota no se usa al planificar."""
 
+    # Una pelota a más de esta distancia se alcanza con A*; más cerca, con el
+    # control reactivo de aproximación final.
+    DISTANCIA_FINAL_M = 2.5
+    # Cuadros consecutivos para aceptar una pelota lejana (evita falsos
+    # positivos de un solo píxel en el borde del frustum).
+    CONFIRMACIONES_LEJOS = 4
+    # Tiempo máximo sin ver la pelota antes de olvidarla y retomar la ruta.
+    PERDIDA_MAX_S = 8.0
+
     def __init__(self, mundo, mapa, margen_m: float, timeout_s: float = 300.0):
         escenario = getattr(mapa, "escenario", {}) or {}
         if not escenario.get("pelota_oculta"):
@@ -40,6 +49,10 @@ class MisionParque:
         self._inicio = time.monotonic()
         self._confirmaciones_pelota = 0
         self._pelota_perdida_desde = None
+        self._pelota_muestras = []
+        self._pelota_est = None
+        self._destino_pelota = None
+        self._t_control = 0.0
         self._escaneo_desde = None
         self._persona_visible_previa = False
         self.metricas = {"distancia_m": 0.0, "replanificaciones": 0,
@@ -61,8 +74,9 @@ class MisionParque:
                        key=lambda p: (p[0] - f) ** 2 + (p[1] - c) ** 2)
         return f, c
 
-    def _celda_deteccion(self, pose, objeto):
-        """Proyecta rango y bearing medidos por cámara usando pose del simulador."""
+    @staticmethod
+    def _xy_deteccion(pose, objeto):
+        """Proyecta rango y bearing medidos por cámara a metros de mundo."""
         # MuJoCo entrega depth axial y el eje horizontal de esta cámara está
         # invertido respecto del eje Y del robot (imagen derecha = robot -Y).
         frente = 0.30 + objeto.distancia_m
@@ -70,9 +84,62 @@ class MisionParque:
         yaw = pose["yaw"]
         x = pose["x"] + frente * math.cos(yaw) - lateral * math.sin(yaw)
         y = pose["y"] + frente * math.sin(yaw) + lateral * math.cos(yaw)
-        return self._celda_pose(x, y)
+        return x, y
+
+    def _celda_deteccion(self, pose, objeto):
+        """Celda de la grilla donde cae una detección de cámara."""
+        return self._celda_pose(*self._xy_deteccion(pose, objeto))
+
+    # ---------- memoria de la pelota ----------
+    def _registrar_pelota(self, pose, pelota):
+        """Promedia las últimas estimaciones: una sola lectura lejana es ruidosa."""
+        self._pelota_muestras.append(self._xy_deteccion(pose, pelota))
+        del self._pelota_muestras[:-6]
+        n = len(self._pelota_muestras)
+        self._pelota_est = (sum(p[0] for p in self._pelota_muestras) / n,
+                            sum(p[1] for p in self._pelota_muestras) / n)
+
+    def _planificar_hacia_pelota(self, pose):
+        """A* hacia la celda libre más cercana a la pelota estimada."""
+        if self._pelota_est is None:
+            raise SinRuta("Sin estimación de la pelota.")
+        destino = self._celda_pose(*self._pelota_est)
+        inicio = self._celda_pose(pose["x"], pose["y"])
+        ruta = astar(self.mapa, inicio=inicio, destino=destino,
+                     margen_m=self.margen_m)
+        self.navegador = NavegadorAstar(self.mundo, self.mapa, ruta)
+        self.ruta = ruta
+        self.mapa.ruta = ruta
+        self._destino_pelota = destino
+        self._ultima_replanificacion = time.monotonic()
+        self.metricas["replanificaciones"] += 1
+
+    def _olvidar_pelota(self):
+        self._pelota_est = None
+        self._pelota_muestras = []
+        self._destino_pelota = None
+        self._confirmaciones_pelota = 0
+        self._pelota_perdida_desde = None
+
+    def control(self):
+        """Lazo rápido (cada ciclo del visor): sólo ejecuta el seguimiento de ruta.
+
+        Separado de ``paso`` (que depende del render de la cámara, ~10 Hz o
+        menos) para que las órdenes de velocidad no venzan entre capturas y el
+        robot no avance a tirones.
+        """
+        ahora = time.monotonic()
+        if ahora - self._t_control < 0.005:
+            return          # ya se ejecutó en este ciclo
+        if (self.navegador is not None and self.estado in (
+                "NAVEGANDO", "EXPLORANDO", "REPLANIFICANDO",
+                "APROXIMANDO_PELOTA")):
+            self._t_control = ahora
+            self.navegador.paso()
 
     def _mapa_temporal(self, detecciones, pose):
+        if not any(o.categoria == "persona" for o in detecciones):
+            return self.mapa      # mapa estático: sin copia profunda por replan
         mapa = copy.deepcopy(self.mapa)
         for objeto in detecciones:
             # El circuito estático ya forma parte del mapa previo. Solo las
@@ -191,22 +258,53 @@ class MisionParque:
             return self.estado
         if pelota is not None:
             self._pelota_perdida_desde = None
+            self._registrar_pelota(pose, pelota)
             self._confirmaciones_pelota += 1
-            if self._confirmaciones_pelota < 2:
+            # Histéresis: una vez en el tramo final no se vuelve a A* por una
+            # lectura de rango que oscila alrededor del umbral.
+            umbral = self.DISTANCIA_FINAL_M + (
+                0.7 if self.estado in ("ACERCANDOSE", "DETECTANDO_PELOTA") else 0.0)
+            cerca = pelota.distancia_m <= umbral
+            necesarias = 2 if cerca else self.CONFIRMACIONES_LEJOS
+            if self._confirmaciones_pelota >= necesarias:
+                if cerca:
+                    # Tramo final: control reactivo a la vista de la pelota.
+                    self.estado = "ACERCANDOSE"
+                    self.motivo = "Pelota a la vista; aproximación final."
+                    estado_seguidor = self.seguidor.paso(pelota)
+                    if estado_seguidor == "distancia_objetivo":
+                        self.mundo.detener()
+                        self.estado = "VERIFICANDO_MANIOBRA"
+                    return self.estado
+                # Pelota lejana confirmada: ir con A* (esquiva obstáculos) en
+                # lugar de perseguirla en línea recta y perderla tras un árbol.
+                refrescar = (self.estado != "APROXIMANDO_PELOTA"
+                             or self.navegador is None
+                             or self._celda_pose(*self._pelota_est)
+                             != self._destino_pelota
+                             and ahora - self._ultima_replanificacion > 2.0)
+                if refrescar:
+                    try:
+                        self._planificar_hacia_pelota(pose)
+                    except SinRuta:
+                        pelota = None
+                    else:
+                        self.motivo = "Pelota detectada; acercándome con A*."
+                if pelota is not None:
+                    self.estado = "APROXIMANDO_PELOTA"
+                    return self.estado
+            elif cerca:
                 self.mundo.detener()
                 self.estado = "DETECTANDO_PELOTA"
                 return self.estado
-            self.estado = "ACERCANDOSE"
-            estado_seguidor = self.seguidor.paso(pelota)
-            if estado_seguidor == "distancia_objetivo":
-                self.mundo.detener()
-                self.estado = "VERIFICANDO_MANIOBRA"
-            return self.estado
-        self._confirmaciones_pelota = 0
+            # Lejos y aún sin confirmar: sigue la ruta sin frenar.
+        else:
+            self._confirmaciones_pelota = 0
+
         if self.estado == "ESCANEANDO":
             duracion = max(0.5, float((getattr(self.mapa, "escenario", {}) or {})
                                       .get("escaneo_duracion_s", 7.0)))
-            if ahora - self._escaneo_desde < duracion:
+            if ahora - (self._escaneo_desde or ahora) < duracion:
                 self.mundo.set_velocidad(0.0, 0.0, 0.45, duracion=0.15)
                 self.motivo = "Barrido visual del sector, rotando en el lugar."
                 return self.estado
@@ -219,18 +317,39 @@ class MisionParque:
                 self.estado = "ERROR"
                 self.motivo = "No se puede alcanzar el siguiente sector de búsqueda."
                 return self.estado
-        if self.estado in ("ACERCANDOSE", "DETECTANDO_PELOTA"):
+        if self.estado in ("ACERCANDOSE", "DETECTANDO_PELOTA", "APROXIMANDO_PELOTA"):
+            # Pelota fuera de vista (tapada por un árbol, borde del frustum...).
             if self._pelota_perdida_desde is None:
                 self._pelota_perdida_desde = ahora
-            if ahora - self._pelota_perdida_desde < 1.5:
-                self.mundo.set_velocidad(0.0, 0.0, 0.25, duracion=0.15)
-                self.estado = "DETECTANDO_PELOTA"
-                self.motivo = "Pelota perdió visibilidad; escaneo lento para reacquirir."
-                return self.estado
+            perdida = ahora - self._pelota_perdida_desde
+            if self._pelota_est is not None and perdida < self.PERDIDA_MAX_S:
+                # Conserva la memoria: sigue hacia la última posición conocida
+                # en vez de oscilar entre "buscar" y "perseguir".
+                if (self.estado != "APROXIMANDO_PELOTA"
+                        or self.navegador is None):
+                    try:
+                        self._planificar_hacia_pelota(pose)
+                    except SinRuta:
+                        self._olvidar_pelota()
+                    else:
+                        self.estado = "APROXIMANDO_PELOTA"
+                        self.motivo = ("Pelota fuera de vista; voy a la última "
+                                       "posición conocida.")
+                        return self.estado
+                if self.estado == "APROXIMANDO_PELOTA":
+                    if self.navegador.estado == "completado":
+                        self.mundo.set_velocidad(0.0, 0.0, 0.45, duracion=0.15)
+                        self.motivo = "En la última posición conocida; giro para reubicarla."
+                    return self.estado
             self.mundo.detener()
-            self.estado = "NAVEGANDO"
-            self.motivo = "Pelota no reacquirida; reanudo exploración del mapa."
-            self._pelota_perdida_desde = None
+            self._olvidar_pelota()
+            self.estado = "REPLANIFICANDO"
+            self.motivo = "Pelota no reacquirida; retomo la ruta de búsqueda."
+            try:
+                self._planificar(detecciones, pose)
+            except SinRuta:
+                self.estado = "ERROR"
+                self.motivo = "No se puede alcanzar el siguiente sector de búsqueda."
             return self.estado
 
         if self.estado in ("ACERCANDOSE", "ESPERANDO_PERSONA",
@@ -244,7 +363,10 @@ class MisionParque:
                 return self.estado
             self.estado = "REPLANIFICANDO"
 
-        elif ahora - self._ultima_replanificacion >= 0.5:
+        elif (any(d.categoria == "persona" for d in detecciones)
+              or self.navegador is None
+              or self.navegador.estado == "atascado") \
+                and ahora - self._ultima_replanificacion >= 0.5:
             try:
                 self._planificar(detecciones, pose)
                 if any(d.categoria == "persona" for d in detecciones):
@@ -257,17 +379,22 @@ class MisionParque:
                                    "Obstáculo temporal bloquea el siguiente sector.")
                 return self.estado
 
-        if self.navegador and self.navegador.paso() == "completado":
+        self.control()
+        if self.navegador and self.navegador.estado == "completado":
             self.mundo.detener()
+            indice_busqueda = int((getattr(self.mapa, "escenario", {}) or {})
+                                  .get("detectar_pelota_desde_waypoint", 0))
+            if self.indice_waypoint >= indice_busqueda:
+                # Llegó al waypoint declarado: barrido visual ahí mismo (también
+                # en el último). El índice avanza UNA sola vez, al terminar el
+                # barrido. Antes avanzaba al llegar y otra vez tras el barrido,
+                # y el robot se saltaba un waypoint de cada dos.
+                self._escaneo_desde = ahora
+                self.estado = "ESCANEANDO"
+                self.motivo = "Barrido visual del sector antes de continuar la ruta."
+                return self.estado
             if self.indice_waypoint + 1 < len(self.waypoints):
                 self.indice_waypoint += 1
-                indice_busqueda = int((getattr(self.mapa, "escenario", {}) or {})
-                                      .get("detectar_pelota_desde_waypoint", 0))
-                if self.indice_waypoint >= indice_busqueda:
-                    self._escaneo_desde = ahora
-                    self.estado = "ESCANEANDO"
-                    self.motivo = "Barrido visual del sector antes de continuar la ruta."
-                    return self.estado
                 try:
                     self._planificar(detecciones, pose)
                     self.estado = "EXPLORANDO"

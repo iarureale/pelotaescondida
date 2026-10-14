@@ -141,12 +141,9 @@ class SimuladorOficial:
         self._ultima_captura_camara = 0.0
         self.seguidor_pelota = None
         self.mision = None
+        self._pedido_reinicio = False
         if self.mision_parque:
-            from .mision_go2 import MisionParque
-            from .robots import HUELLA
-            largo, ancho = HUELLA[self.robot.clave]
-            margen = math.hypot(largo / 2, ancho / 2) + 0.05
-            self.mision = MisionParque(self.mundo, self.mapa, margen)
+            self.mision = self._crear_mision()
         if self.seguir_pelota:
             from .camara_go2 import SeguidorPelota
             self.seguidor_pelota = SeguidorPelota(self.mundo)
@@ -317,6 +314,39 @@ class SimuladorOficial:
         threading.Thread(target=bucle_bms, daemon=True).start()
         if self.verboso:
             print("  [DDS] Bateria activa: rt/lf/bmsstate (lo usa el TP05)")
+
+    # ---------- misión ----------
+    def _crear_mision(self):
+        from .mision_go2 import MisionParque
+        from .robots import HUELLA
+        largo, ancho = HUELLA[self.robot.clave]
+        margen = math.hypot(largo / 2, ancho / 2) + 0.05
+        return MisionParque(self.mundo, self.mapa, margen)
+
+    def reiniciar_mision(self):
+        """Vuelve al inicio y repite el recorrido desde cero (tecla R).
+
+        El mundo es cinemático y determinista: misma pose inicial + misma
+        lista de waypoints = mismo recorrido.
+        """
+        if not self.mision_parque:
+            return
+        self.mundo.detener()
+        self.mundo.reiniciar()          # vuelve a la pose fijada con situar()
+        self.mapa.ruta = []
+        self._inicio_escenario = time.monotonic()
+        self._estado_mision_reportado = None
+        self._metricas_mision_reportadas = False
+        self._contacto_reportado = False
+        self._ultima_captura_camara = 0.0
+        self.ultima_percepcion = []
+        self.mision = self._crear_mision()
+        print("\n  [MISION] Reiniciada: el Go2 vuelve al inicio y repite el recorrido.")
+
+    def _tecla(self, keycode):
+        """Callback del visor (hilo de la GUI): sólo levanta una bandera."""
+        if keycode in (ord("R"), ord("r")):
+            self._pedido_reinicio = True
 
     # ---------- pose ----------
     def _escribir_pose(self):
@@ -550,7 +580,8 @@ class SimuladorOficial:
         import mujoco.viewer
 
         with mujoco.viewer.launch_passive(
-            self.model, self.data, show_left_ui=False, show_right_ui=False
+            self.model, self.data, show_left_ui=False, show_right_ui=False,
+            key_callback=self._tecla
         ) as v:
             seguir_go2 = getattr(self.mundo, "velocidad_autonoma_max", None) is not None
             proximo_estado_go2 = 0.0
@@ -571,18 +602,39 @@ class SimuladorOficial:
                 if seguir_go2:
                     # El patio nuevo es mucho mayor que la escena limpia. Una
                     # vista fija deja al robot diminuto y puede parecer quieto.
-                    v.cam.distance = min(18.0, max(10.0,
-                        0.55 * max(self.mapa.filas, self.mapa.columnas)
-                        * self.mapa.tamano_celda))
+                    # Cámara de seguimiento cercana: con el Go2 de 0,7 m, a
+                    # 10-18 m ocupaba ~30 px y parecía "perderse". A 6 m se lo
+                    # ve con claridad y el patio sigue a la vista; la rueda
+                    # del mouse permite alejar o acercar.
+                    v.cam.distance = 6.0
+                    v.cam.elevation = -30
+                    v.cam.azimuth = -40
+                    pose0 = self.mundo.leer()
+                    cam_xy = [pose0["x"], pose0["y"]]
             self.iniciar_transporte()
             periodo = self.cfg.VIEWER_DT
+            t_cam = time.perf_counter()
+            if 'cam_xy' not in dir():
+                cam_xy = [0.0, 0.0]
             while v.is_running():
                 inicio = time.perf_counter()
+                if self._pedido_reinicio:
+                    self._pedido_reinicio = False
+                    self.reiniciar_mision()
+                    cam_xy = [self.mundo.leer()["x"], self.mundo.leer()["y"]]
                 self.mundo.avanzar()
                 self._escribir_pose()
+                if self.mision is not None:
+                    self.mision.control()    # lazo rápido de seguimiento de ruta
                 if seguir_go2:
                     pose = self.mundo.leer()
-                    v.cam.lookat[:] = [pose["x"], pose["y"], 0.25]
+                    # Seguimiento suavizado: filtra el rebote de la marcha y
+                    # evita que la vista "salte" con cada ajuste de rumbo.
+                    k = 1.0 - math.exp(-(inicio - t_cam) / 0.25)
+                    t_cam = inicio
+                    cam_xy[0] += (pose["x"] - cam_xy[0]) * k
+                    cam_xy[1] += (pose["y"] - cam_xy[1]) * k
+                    v.cam.lookat[:] = [cam_xy[0], cam_xy[1], 0.25]
                     ahora = time.monotonic()
                     if ahora >= proximo_estado_go2:
                         print(f"  [GO2] {pose['accion']} | "
@@ -614,8 +666,13 @@ class SimuladorOficial:
         vista = VistaConsola(verboso=self.verboso) if self.verboso else None
         self.iniciar_transporte()
         while True:
+            if self._pedido_reinicio:
+                self._pedido_reinicio = False
+                self.reiniciar_mision()
             self.mundo.avanzar()
             self._escribir_pose()
+            if self.mision is not None:
+                self.mision.control()
             if self.seguidor_pelota is not None or self.mision is not None:
                 self._paso_seguimiento_visual()
             self._volcar_avisos()

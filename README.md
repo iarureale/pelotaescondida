@@ -26,6 +26,8 @@ python -m sim --voz
 
 Luego decir: «busca la pelota roja».
 
+En la ventana 3D, la tecla **R** reinicia la misión y repite el recorrido.
+
 ## Alcance
 
 La cámara usa renderizado y segmentación de MuJoCo; A* usa la pose real del simulador. La locomoción rápida (hasta 3 m/s) y el backflip son animaciones cinemáticas locales. No representan dinámica física, SLAM ni una acrobacia validada para el robot real.

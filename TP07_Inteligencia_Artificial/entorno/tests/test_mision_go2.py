@@ -96,5 +96,88 @@ class MisionGo2Tests(unittest.TestCase):
         self.assertIn("10 s", self.mision.motivo)
 
 
+class MisionPatioTests(unittest.TestCase):
+    """Regresión del bucle NAVEGANDO <-> DETECTANDO_PELOTA <-> ACERCANDOSE."""
+
+    def setUp(self):
+        ruta = os.path.join(os.path.dirname(__file__), "..", "..", "mi_desarrollo",
+                            "mapas", "patio_uade_go2.json")
+        self.mapa = cargar(ruta)
+        self.mundo = Mundo(perfil("tp07"))
+        self.mundo.habilitar_carrera_simulada(3.0, 2.0)
+        x, y = self.mapa.a_mundo(*self.mapa.inicio)
+        self.mundo.situar(x, y, self.mapa.rumbo_inicial())
+        self.mision = MisionParque(self.mundo, self.mapa, margen_m=0.39)
+
+    def pelota(self, distancia, bearing=0.0):
+        return ObjetoPercibido("nav_target_ball", "pelota", 160, 120, bearing,
+                               distancia, 40)
+
+    def test_pelota_lejana_se_alcanza_con_astar_y_no_con_persecucion_recta(self):
+        estados = [self.mision.paso([self.pelota(9.0, 0.1)]) for _ in range(5)]
+        self.assertEqual(estados[-1], "APROXIMANDO_PELOTA")
+        self.assertNotIn("ACERCANDOSE", estados)
+        self.assertIsNotNone(self.mision.navegador)
+        self.assertEqual(self.mision.ruta[-1], self.mision._destino_pelota)
+
+    def test_un_solo_cuadro_lejano_no_interrumpe_la_ruta(self):
+        self.mision.paso([self.pelota(12.0)])
+        self.assertNotIn(self.mision.estado,
+                         ("APROXIMANDO_PELOTA", "DETECTANDO_PELOTA", "ACERCANDOSE"))
+
+    def test_pelota_tapada_no_provoca_oscilacion_y_luego_se_retoma_la_ruta(self):
+        from unittest import mock
+        import sim.mision_go2 as mod
+        # Reloj falso anclado al inicio de la misión (independiente del uptime).
+        reloj = [self.mision._inicio + 10.0]
+        with mock.patch.object(mod.time, "monotonic", lambda: reloj[0]):
+            for _ in range(5):
+                self.mision.paso([self.pelota(9.0, 0.1)])
+            self.assertEqual(self.mision.estado, "APROXIMANDO_PELOTA")
+            # Se pierde de vista varios cuadros: conserva la memoria.
+            vistos = set()
+            for _ in range(20):
+                reloj[0] += 0.1
+                vistos.add(self.mision.paso([]))
+            self.assertEqual(vistos, {"APROXIMANDO_PELOTA"})
+            # Pasado el tiempo máximo sin verla, olvida y retoma la búsqueda.
+            reloj[0] += mod.MisionParque.PERDIDA_MAX_S + 1
+            self.assertEqual(self.mision.paso([]), "REPLANIFICANDO")
+            self.assertIsNone(self.mision._pelota_est)
+
+    def test_pelota_cercana_usa_aproximacion_final(self):
+        estados = [self.mision.paso([self.pelota(1.5)]) for _ in range(3)]
+        self.assertEqual(estados[0], "DETECTANDO_PELOTA")
+        self.assertEqual(estados[1], "ACERCANDOSE")
+
+    def test_visita_todos_los_waypoints_en_orden_sin_saltear_ninguno(self):
+        from unittest import mock
+        import sim.mision_go2 as mod
+        reloj = [self.mision._inicio]
+        visitados = []
+        with mock.patch.object(mod.time, "monotonic", lambda: reloj[0]):
+            for _ in range(60000):
+                reloj[0] += 0.02
+                self.mundo.avanzar(0.02)
+                self.mision.control()
+                if int(reloj[0] * 50) % 5 == 0:
+                    est = self.mision.paso([])
+                    if est == "ESCANEANDO" and (
+                            not visitados
+                            or visitados[-1] != self.mision.indice_waypoint):
+                        visitados.append(self.mision.indice_waypoint)
+                    if est in ("ERROR", "FINALIZADA"):
+                        break
+        self.assertEqual(visitados, list(range(len(self.mapa.escenario["busqueda"]))))
+        self.assertIn("recorrieron los sectores", self.mision.motivo)
+
+    def test_control_rapido_no_replanifica(self):
+        antes = self.mision.metricas["replanificaciones"]
+        for _ in range(100):
+            self.mundo.avanzar(0.02)
+            self.mision.control()
+        self.assertEqual(self.mision.metricas["replanificaciones"], antes)
+
+
 if __name__ == "__main__":
     unittest.main()

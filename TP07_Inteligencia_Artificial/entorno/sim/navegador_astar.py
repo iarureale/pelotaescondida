@@ -38,33 +38,100 @@ class NavegadorAstar:
         self.indice = 0
         self.estado = "esperando"
         self._hilo = None
+        self._t_previo = 0.0
+        self._v = 0.0
+        self._w = 0.0
+        p0 = mundo.leer()
+        self._origen = (p0["x"], p0["y"])
+        self._ref_t = time.monotonic()
+        self._ref_xy = (p0["x"], p0["y"])
+
+    # --- Parámetros del seguimiento (ver NAVEGACION_GO2.md, "Seguimiento") ---
+    LOOKAHEAD_M = 0.80        # "zanahoria" sobre el tramo: mantiene al robot en la línea
+    TOLERANCIA_ESQUINA_M = 0.30
+    GANANCIA_GIRO = 2.0
+    ERROR_GIRO_EN_SITIO = 0.90   # rad; por encima gira sin avanzar
+    ACEL_LINEAL = 1.5            # m/s²  (rampa de arranque/frenado)
+    ACEL_ANGULAR = 5.0           # rad/s² (evita golpes de giro)
+    VENTANA_ATASCO_S = 6.0
+    PROGRESO_MIN_M = 0.20
+
+    def _limites(self):
+        w = (getattr(self.mundo, "velocidad_angular_autonoma_max", None)
+             or self.mundo.perfil.velocidad_angular_max)
+        return self.velocidad_m_s, w
 
     def paso(self) -> str:
-        """Actualiza una orden corta. Expuesto para integrar y probar por ciclo."""
-        if self.estado in ("completado", "error", "detenido"):
+        """Una orden corta y continua. Se llama en CADA ciclo del visor (~50 Hz).
+
+        Sigue el tramo anterior->objetivo con un punto de mira (pure pursuit
+        simplificado): el robot converge a la línea de la grilla en lugar de
+        cortar en diagonal hacia la esquina, gira de forma progresiva
+        (avanza mientras corrige) y solo gira en el sitio si el error es
+        grande. Velocidades con rampa: sin saltos ni vibraciones.
+        """
+        if self.estado in ("completado", "error", "detenido", "atascado"):
             return self.estado
         self.estado = "navegando"
+        ahora = time.monotonic()
+        dt = min(0.2, max(1e-3, ahora - self._t_previo)) if self._t_previo else 0.02
+        self._t_previo = ahora
         pose = self.mundo.leer()
+        px, py, yaw = pose["x"], pose["y"], pose["yaw"]
+        vmax, wmax = self._limites()
+
         while self.indice < len(self.puntos):
             tx, ty = self.puntos[self.indice]
-            dx, dy = tx - pose["x"], ty - pose["y"]
-            distancia = math.hypot(dx, dy)
-            if distancia <= self.tolerancia_m:
+            es_final = self.indice == len(self.puntos) - 1
+            tol = self.tolerancia_m if es_final else self.TOLERANCIA_ESQUINA_M
+            if math.hypot(tx - px, ty - py) <= tol:
+                self._origen = (tx, ty)
                 self.indice += 1
                 continue
-            objetivo = math.atan2(dy, dx)
-            error = (objetivo - pose["yaw"] + math.pi) % (2 * math.pi) - math.pi
-            if abs(error) > 0.20:
-                limite_giro = (getattr(self.mundo, "velocidad_angular_autonoma_max", None)
-                               or self.mundo.perfil.velocidad_angular_max)
-                vyaw = max(-limite_giro, min(limite_giro, 1.6 * error))
-                self.mundo.mover_autonomo(0.0, 0.0, vyaw, duracion=0.15)
-            else:
-                vx = min(self.velocidad_m_s, max(0.06, distancia * 0.8))
-                self.mundo.mover_autonomo(vx, 0.0, 0.0, duracion=0.15)
+            break
+        else:
+            self.mundo.detener()
+            self.estado = "completado"
             return self.estado
-        self.mundo.detener()
-        self.estado = "completado"
+
+        ox, oy = self._origen if self._origen else (px, py)
+        dist = math.hypot(tx - px, ty - py)
+        # Punto de mira: proyección sobre el tramo + LOOKAHEAD, sin pasar del objetivo.
+        sx, sy = tx - ox, ty - oy
+        largo = math.hypot(sx, sy)
+        if largo > 1e-6:
+            ux, uy = sx / largo, sy / largo
+            proy = (px - ox) * ux + (py - oy) * uy
+            mx = ox + ux * min(largo, max(0.0, proy) + self.LOOKAHEAD_M)
+            my = oy + uy * min(largo, max(0.0, proy) + self.LOOKAHEAD_M)
+        else:
+            mx, my = tx, ty
+        error = (math.atan2(my - py, mx - px) - yaw + math.pi) % (2 * math.pi) - math.pi
+
+        w_deseada = max(-wmax, min(wmax, self.GANANCIA_GIRO * error))
+        if abs(error) > self.ERROR_GIRO_EN_SITIO:
+            v_deseada = 0.0
+        else:
+            alineacion = max(0.0, math.cos(error)) ** 2
+            # Frena para la esquina (giro de 90°) y para el destino final.
+            v_frenado = (max(0.06, 0.8 * dist) if es_final
+                         else 0.35 + 1.4 * dist)
+            v_deseada = min(vmax, v_frenado) * alineacion
+        # Rampas de aceleración.
+        dv = self.ACEL_LINEAL * dt
+        dw = self.ACEL_ANGULAR * dt
+        self._v = max(self._v - 3.0 * dt if v_deseada < self._v else self._v,
+                      min(self._v + dv, v_deseada))
+        self._w = max(self._w - dw, min(self._w + dw, w_deseada))
+        self.mundo.mover_autonomo(self._v, 0.0, self._w, duracion=0.50)
+
+        # Detección de atasco: comanda avanzar pero no se mueve.
+        if (ahora - self._ref_t) >= self.VENTANA_ATASCO_S:
+            if math.hypot(px - self._ref_xy[0], py - self._ref_xy[1]) < self.PROGRESO_MIN_M:
+                self.mundo.detener()
+                self.estado = "atascado"
+                return self.estado
+            self._ref_t, self._ref_xy = ahora, (px, py)
         return self.estado
 
     def iniciar(self, detener: threading.Event, periodo_s: float = 0.05):
