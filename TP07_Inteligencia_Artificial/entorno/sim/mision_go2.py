@@ -7,7 +7,7 @@ import time
 
 from .camara_go2 import SeguidorPelota
 from .navegador_astar import NavegadorAstar
-from .planificacion_go2 import SinRuta, astar
+from .planificacion_go2 import SinRuta, astar, ruta_densa, suavizar_ruta
 
 
 BACKFLIP_CINEMATICO_DISPONIBLE = True
@@ -22,8 +22,16 @@ class MisionParque:
     # Cuadros consecutivos para aceptar una pelota lejana (evita falsos
     # positivos de un solo píxel en el borde del frustum).
     CONFIRMACIONES_LEJOS = 4
-    # Tiempo máximo sin ver la pelota antes de olvidarla y retomar la ruta.
-    PERDIDA_MAX_S = 8.0
+    # Tope de seguridad (s) sin ver la pelota, medido desde la última vez que se
+    # la vio, antes de olvidarla aunque siga viajando. En el caso normal la
+    # memoria se descarta al llegar a la última posición y completar un barrido.
+    PERDIDA_MAX_S = 90.0
+    # Holgura extra (m) que deben respetar los atajos en línea recta: absorbe el
+    # error de seguimiento (~5 cm) para que el robot nunca roce el margen de A*.
+    HOLGURA_ATAJO_M = 0.10
+    # Duración (s) del barrido de 360° en la última posición conocida. El perfil
+    # limita el giro a 0,5 rad/s: 2π/14 s = 0,45 rad/s completa la vuelta.
+    BARRIDO_PELOTA_S = 14.0
 
     def __init__(self, mundo, mapa, margen_m: float, timeout_s: float = 300.0):
         escenario = getattr(mapa, "escenario", {}) or {}
@@ -49,6 +57,7 @@ class MisionParque:
         self._inicio = time.monotonic()
         self._confirmaciones_pelota = 0
         self._pelota_perdida_desde = None
+        self._barrido_pelota_desde = None
         self._pelota_muestras = []
         self._pelota_est = None
         self._destino_pelota = None
@@ -107,14 +116,16 @@ class MisionParque:
         inicio = self._celda_pose(pose["x"], pose["y"])
         ruta = astar(self.mapa, inicio=inicio, destino=destino,
                      margen_m=self.margen_m)
-        self.navegador = NavegadorAstar(self.mundo, self.mapa, ruta)
-        self.ruta = ruta
-        self.mapa.ruta = ruta
+        vertices = suavizar_ruta(self.mapa, ruta, self.margen_m + self.HOLGURA_ATAJO_M)
+        self.navegador = NavegadorAstar(self.mundo, self.mapa, vertices)
+        self.ruta = ruta_densa(vertices)      # lo que se dibuja = lo que se sigue
+        self.mapa.ruta = self.ruta
         self._destino_pelota = destino
         self._ultima_replanificacion = time.monotonic()
         self.metricas["replanificaciones"] += 1
 
     def _olvidar_pelota(self):
+        self._barrido_pelota_desde = None
         self._pelota_est = None
         self._pelota_muestras = []
         self._destino_pelota = None
@@ -161,9 +172,10 @@ class MisionParque:
         objetivo = self.waypoints[self.indice_waypoint]
         ruta = astar(temporal, inicio=inicio, destino=objetivo,
                      margen_m=self.margen_m)
-        self.navegador = NavegadorAstar(self.mundo, temporal, ruta)
-        self.ruta = ruta
-        self.mapa.ruta = ruta
+        vertices = suavizar_ruta(temporal, ruta, self.margen_m + self.HOLGURA_ATAJO_M)
+        self.navegador = NavegadorAstar(self.mundo, temporal, vertices)
+        self.ruta = ruta_densa(vertices)
+        self.mapa.ruta = self.ruta
         self._ultima_replanificacion = time.monotonic()
         self._bloqueo_desde = None
         self.motivo = ""
@@ -181,12 +193,16 @@ class MisionParque:
             self.estado = "ESPERANDO_OBSTACULO"
             self.motivo = mensaje
 
-    def paso(self, detecciones):
+    def paso(self, detecciones, pose_captura=None):
         if self.estado in ("FINALIZADA", "ERROR", "BACKFLIP_NO_DISPONIBLE",
                            "BACKFLIP_OMITIDO", "BACKFLIP_SIMULADO"):
             return self.estado
         ahora = time.monotonic()
         pose = self.mundo.leer()
+        # Pose del robot EN EL INSTANTE del cuadro: con la cámara en otro hilo el
+        # robot avanzó desde la captura y proyectar con la pose actual corría la
+        # pelota estimada hasta ~0,9 m a 3 m/s.
+        pose_cam = pose_captura or pose
         dx, dy = pose["x"] - self._ultimo_xy[0], pose["y"] - self._ultimo_xy[1]
         self.metricas["distancia_m"] += math.hypot(dx, dy)
         self._ultimo_xy = (pose["x"], pose["y"])
@@ -213,7 +229,7 @@ class MisionParque:
                 if persona.categoria != "persona":
                     continue
                 try:
-                    if self._celda_deteccion(pose, persona) in ruta_actual:
+                    if self._celda_deteccion(pose_cam, persona) in ruta_actual:
                         self.metricas["obstaculos_evitados"] += 1
                         break
                 except SinRuta:
@@ -258,7 +274,8 @@ class MisionParque:
             return self.estado
         if pelota is not None:
             self._pelota_perdida_desde = None
-            self._registrar_pelota(pose, pelota)
+            self._barrido_pelota_desde = None
+            self._registrar_pelota(pose_cam, pelota)
             self._confirmaciones_pelota += 1
             # Histéresis: una vez en el tramo final no se vuelve a A* por una
             # lectura de rango que oscila alrededor del umbral.
@@ -297,7 +314,10 @@ class MisionParque:
                 self.mundo.detener()
                 self.estado = "DETECTANDO_PELOTA"
                 return self.estado
-            # Lejos y aún sin confirmar: sigue la ruta sin frenar.
+            # Lejos y aún sin confirmar: sigue la ruta sin frenar. Si ya iba hacia
+            # la pelota, sigue ese camino (no es un fin de waypoint ni una pérdida).
+            if self.estado == "APROXIMANDO_PELOTA":
+                return self.estado
         else:
             self._confirmaciones_pelota = 0
 
@@ -317,7 +337,8 @@ class MisionParque:
                 self.estado = "ERROR"
                 self.motivo = "No se puede alcanzar el siguiente sector de búsqueda."
                 return self.estado
-        if self.estado in ("ACERCANDOSE", "DETECTANDO_PELOTA", "APROXIMANDO_PELOTA"):
+        if pelota is None and self.estado in (
+                "ACERCANDOSE", "DETECTANDO_PELOTA", "APROXIMANDO_PELOTA"):
             # Pelota fuera de vista (tapada por un árbol, borde del frustum...).
             if self._pelota_perdida_desde is None:
                 self._pelota_perdida_desde = ahora
@@ -337,10 +358,26 @@ class MisionParque:
                                        "posición conocida.")
                         return self.estado
                 if self.estado == "APROXIMANDO_PELOTA":
-                    if self.navegador.estado == "completado":
-                        self.mundo.set_velocidad(0.0, 0.0, 0.45, duracion=0.15)
-                        self.motivo = "En la última posición conocida; giro para reubicarla."
-                    return self.estado
+                    if self.navegador.estado == "atascado":
+                        pass                       # cae a retomar la ruta
+                    elif self.navegador.estado != "completado":
+                        # Todavía viajando: la pelota puede quedar fuera del
+                        # cuadro durante el trayecto (árboles, giros). No
+                        # corre ningún tiempo de espera hasta llegar.
+                        return self.estado
+                    else:
+                        # Llegó a la última posición conocida sin verla: barrido
+                        # completo de 360° ahí mismo antes de rendirse.
+                        if self._barrido_pelota_desde is None:
+                            self._barrido_pelota_desde = ahora
+                            self.mundo.detener()
+                        if ahora - self._barrido_pelota_desde < self.BARRIDO_PELOTA_S:
+                            self.mundo.set_velocidad(
+                                0.0, 0.0, 2 * math.pi / self.BARRIDO_PELOTA_S,
+                                duracion=0.15)
+                            self.motivo = ("En la última posición conocida; "
+                                           "barrido de 360° para reubicarla.")
+                            return self.estado
             self.mundo.detener()
             self._olvidar_pelota()
             self.estado = "REPLANIFICANDO"

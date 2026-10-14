@@ -1,3 +1,4 @@
+import math
 import os
 import time
 import unittest
@@ -142,6 +143,51 @@ class MisionPatioTests(unittest.TestCase):
             self.assertEqual(vistos, {"APROXIMANDO_PELOTA"})
             # Pasado el tiempo máximo sin verla, olvida y retoma la búsqueda.
             reloj[0] += mod.MisionParque.PERDIDA_MAX_S + 1
+            self.assertEqual(self.mision.paso([]), "REPLANIFICANDO")
+            self.assertIsNone(self.mision._pelota_est)
+
+    def _mision_con_pelota_recordada(self, reloj):
+        import sim.mision_go2 as mod
+        for _ in range(5):
+            self.mision.paso([self.pelota(9.0, 0.1)])
+        self.assertEqual(self.mision.estado, "APROXIMANDO_PELOTA")
+        return mod
+
+    def test_no_olvida_la_pelota_mientras_todavia_viaja_hacia_ella(self):
+        from unittest import mock
+        import sim.mision_go2 as mod
+        reloj = [self.mision._inicio + 10.0]
+        with mock.patch.object(mod.time, "monotonic", lambda: reloj[0]):
+            self._mision_con_pelota_recordada(reloj)
+            # 40 s sin verla pero el navegador sigue en camino (viaje largo).
+            for _ in range(400):
+                reloj[0] += 0.1
+                self.assertEqual(self.mision.paso([]), "APROXIMANDO_PELOTA")
+            self.assertIsNotNone(self.mision._pelota_est)
+
+    def test_al_llegar_sin_verla_hace_un_barrido_de_360_y_luego_retoma(self):
+        from unittest import mock
+        import sim.mision_go2 as mod
+        reloj = [self.mision._inicio + 10.0]
+        with mock.patch.object(mod.time, "monotonic", lambda: reloj[0]):
+            self._mision_con_pelota_recordada(reloj)
+            self.mision.navegador.estado = "completado"     # llegó a la posición
+            reloj[0] += 0.1
+            self.assertEqual(self.mision.paso([]), "APROXIMANDO_PELOTA")
+            self.assertIn("barrido", self.mision.motivo)
+            # Gira a ~0,45 rad/s: 360° en BARRIDO_PELOTA_S (dentro del límite 0,5).
+            self.assertAlmostEqual(abs(self.mundo.vyaw),
+                                   2 * math.pi / mod.MisionParque.BARRIDO_PELOTA_S,
+                                   places=2)
+            self.assertLessEqual(abs(self.mundo.vyaw), 0.5)
+            # Dentro del barrido se la vuelve a ver: sigue el acercamiento.
+            reloj[0] += 2.0
+            self.mision.paso([self.pelota(6.0, 0.0)])
+            self.assertIsNone(self.mision._barrido_pelota_desde)
+            # Sin verla, al terminar el barrido olvida y retoma la ruta.
+            self.mision.navegador.estado = "completado"
+            self.mision.paso([])
+            reloj[0] += mod.MisionParque.BARRIDO_PELOTA_S + 0.5
             self.assertEqual(self.mision.paso([]), "REPLANIFICANDO")
             self.assertIsNone(self.mision._pelota_est)
 

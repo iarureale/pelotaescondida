@@ -44,7 +44,7 @@ def crear_escena(base_xml: str, mapa, incluir_bola: bool = False) -> tuple[str, 
     # baldosas, juntas y césped) a 15-30 m y parpadeaban. Menos "haze" para que
     # el fondo no se lave a esa misma distancia.
     scene_xml = scene_xml.replace(
-        "<visual>", '<visual>\n    <quality shadowsize="4096"/>\n'
+        "<visual>", '<visual>\n    <quality shadowsize="2048"/>\n'
         '    <map znear="0.05" zfar="150" haze="0.12"/>', 1)
     scene_xml = scene_xml.replace(
         '<global azimuth="-130" elevation="-20"/>',
@@ -370,21 +370,24 @@ def _arquitectura_patio(ancho: float, alto: float, cx: float, cy: float) -> list
             color_faja = franjas.get(piso, "0.25 0.29 0.31")
             g.append(f'<geom name="uade_{lado}_faja_{piso}" type="box" size="{tam_faja}" '
                      f'pos="{pos_faja}" rgba="{color_faja} 1" contype="0" conaffinity="0"/>')
+            if horizontal:
+                tb, pb = f"{largo / 2 * .98:.2f} 0.22 0.045", (centro, cara - .18, z - .08)
+            else:
+                tb, pb = f"0.22 {largo / 2 * .98:.2f} 0.045", (cara - sentido * .18, centro, z - .08)
+            g.append(f'<geom name="uade_{lado}_balcon_{piso}" type="box" size="{tb}" '
+                     f'pos="{pb[0]:.2f} {pb[1]:.2f} {pb[2]:.2f}" rgba="0.37 0.40 0.39 1" '
+                     'contype="0" conaffinity="0"/>')
             paso_v, n = 2.0, int(largo // 2.0)
             for k in range(1, n):
                 off = -largo / 2 + k * paso_v
                 if horizontal:
                     tv, pv = "0.72 0.025 0.43", (centro + off, cara - .03, z + .48)
-                    tb, pb = "0.78 0.22 0.045", (centro + off, cara - .18, z - .08)
                 else:
                     tv, pv = "0.025 0.72 0.43", (cara - sentido * .03, centro + off, z + .48)
-                    tb, pb = "0.22 0.78 0.045", (cara - sentido * .18, centro + off, z - .08)
                 g.append(f'<geom name="uade_{lado}_ventana_{piso}_{k}" type="box" size="{tv}" '
                          f'pos="{pv[0]:.2f} {pv[1]:.2f} {pv[2]:.2f}" rgba="0.12 0.24 0.34 1" '
                          'contype="0" conaffinity="0"/>')
-                g.append(f'<geom name="uade_{lado}_balcon_{piso}_{k}" type="box" size="{tb}" '
-                         f'pos="{pb[0]:.2f} {pb[1]:.2f} {pb[2]:.2f}" rgba="0.37 0.40 0.39 1" '
-                         'contype="0" conaffinity="0"/>')
+
     # Pérgola peatonal, como la galería de las fotos, sobre un lateral.
     px, py = cx + ancho * .156, cy + alto * .31   # entre las columnas 18 y 23
     g.append(f'<geom name="uade_pergola_techo" type="box" size="4.6 1.65 0.10" '

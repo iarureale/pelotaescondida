@@ -9,8 +9,19 @@ import subprocess
 _SCRIPT_POWERSHELL = r"""
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Speech
-$culture = [System.Globalization.CultureInfo]::new('es-ES')
-$engine = New-Object System.Speech.Recognition.SpeechRecognitionEngine -ArgumentList $culture
+# Prefiere es-ES; si Windows no lo tiene, usa cualquier reconocedor en español
+# instalado (es-MX, es-AR...) en vez de fallar.
+$instalados = [System.Speech.Recognition.SpeechRecognitionEngine]::InstalledRecognizers()
+$rec = $instalados | Where-Object { $_.Culture.Name -eq 'es-ES' } | Select-Object -First 1
+if ($null -eq $rec) {
+  $rec = $instalados | Where-Object { $_.Culture.TwoLetterISOLanguageName -eq 'es' } | Select-Object -First 1
+}
+if ($null -eq $rec) {
+  $lista = ($instalados | ForEach-Object { $_.Culture.Name }) -join ', '
+  throw ('Windows no tiene un reconocedor de voz en español. Instalados: ' + $lista)
+}
+$culture = $rec.Culture
+$engine = New-Object System.Speech.Recognition.SpeechRecognitionEngine -ArgumentList $rec
 try {
   $choices = New-Object System.Speech.Recognition.Choices
   @(

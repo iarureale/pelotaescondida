@@ -110,5 +110,54 @@ class PatioUadeTests(unittest.TestCase):
                 self.assertGreater(math.hypot(cx - ex, cy - ey), largo / 2 + 0.1)
 
 
+class SuavizadoDeRutaTests(unittest.TestCase):
+    """Los atajos acortan la ruta sin acercarse a los obstáculos más que A*."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mapa = cargar(MAPA)
+        largo, ancho = HUELLA["go2"]
+        cls.margen = math.hypot(largo / 2, ancho / 2) + 0.05
+
+    @staticmethod
+    def largo(v):
+        return sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(v, v[1:]))
+
+    def test_acorta_y_reduce_giros_sin_cambiar_extremos(self):
+        from sim.planificacion_go2 import suavizar_ruta
+        ruta = astar(self.mapa, (21, 2), (4, 26), self.margen)
+        v = suavizar_ruta(self.mapa, ruta, self.margen)
+        self.assertEqual((v[0], v[-1]), (ruta[0], ruta[-1]))
+        self.assertLess(self.largo(v), 0.9 * self.largo(ruta))
+        self.assertLess(len(v), len(ruta) // 3)
+
+    def test_todo_el_trayecto_conserva_el_despeje_pedido(self):
+        from sim.planificacion_go2 import _despeje_m, suavizar_ruta
+        margen = self.margen + 0.10
+        for destino in ((4, 26), (3, 3), (20, 3)):
+            ruta = astar(self.mapa, (21, 15), destino, self.margen)
+            v = suavizar_ruta(self.mapa, ruta, margen)
+            for a, b in zip(v, v[1:]):
+                n = max(1, int(self.largo([a, b]) / 0.05))
+                for i in range(n + 1):
+                    f = a[0] + (b[0] - a[0]) * i / n
+                    c = a[1] + (b[1] - a[1]) * i / n
+                    self.assertGreaterEqual(_despeje_m(self.mapa, f, c), margen - 1e-6)
+
+    def test_no_hay_atajo_a_traves_de_un_obstaculo(self):
+        from sim.planificacion_go2 import _segmento_libre
+        banco = next(o["celda"] for o in self.mapa.escenario["objetos"]
+                     if o["tipo"] == "banco")
+        izq = (banco[0], banco[1] - 3)
+        der = (banco[0], banco[1] + 3)
+        self.assertFalse(_segmento_libre(self.mapa, izq, der, self.margen))
+
+    def test_ruta_densa_pasa_por_los_vertices(self):
+        from sim.planificacion_go2 import ruta_densa
+        celdas = ruta_densa([(0, 0), (0, 4), (3, 4)])
+        self.assertEqual((celdas[0], celdas[-1]), ((0, 0), (3, 4)))
+        self.assertIn((0, 4), celdas)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -60,10 +60,27 @@ frena para las esquinas. La velocidad baja al aproximarse al objetivo.
   aproximación final reactiva. Si se tapa, el robot sigue hacia la última
   posición estimada y, tras 8 s sin verla, retoma los waypoints. Antes
   perseguía en línea recta y oscilaba entre buscar y perseguir.
+- **Camino hacia la pelota.** A* devuelve una escalera de ángulos rectos; se
+  reemplaza por tramos rectos con atajos que mantienen el mismo margen de
+  seguridad más 0,10 m a lo largo de todo el segmento
+  (`planificacion_go2.suavizar_ruta`). Lo que se dibuja (puntos amarillos) es lo
+  que se sigue. Mientras viaja hacia la última posición conocida no hay
+  temporizador de pérdida: al llegar sin verla hace un barrido de 360° (14 s a
+  0,45 rad/s) y recién entonces retoma los waypoints.
+- **Voz.** `python -m sim --voz` escucha «busca la pelota roja» (hasta 15 s,
+  antes de abrir la ventana) y luego inicia esta misma misión. Usa el
+  reconocedor en español de Windows (es-ES, o el español que haya instalado).
+  La orden se da una sola vez, al lanzar el programa; **R** reinicia sin volver a
+  pedirla.
 - **Replanificación.** Solo ante personas detectadas, atasco o cambio de objetivo
   (antes, cada 0,5 s).
 - **Reinicio.** Tecla **R** en la ventana 3D: el Go2 vuelve al inicio y repite el
   recorrido. El mundo es determinista, así que la trayectoria es idéntica.
+- **Percepción en hilo aparte.** Con ventana 3D, la captura de cámara (3 renders
+  sincrónicos) corre en su propio hilo y trabaja sobre una copia de la pose; el
+  visor y el seguimiento de ruta (50 Hz) no esperan al render. La misión usa la
+  pose del instante del cuadro para proyectar la pelota. En una GPU lenta esto
+  evita que la ventana baje a ~3-5 cuadros/s y el robot avance a tirones.
 - **Cámara 3D.** Seguimiento suavizado a 6 m; la rueda del mouse acerca o aleja.
 
 ## Modos por separado

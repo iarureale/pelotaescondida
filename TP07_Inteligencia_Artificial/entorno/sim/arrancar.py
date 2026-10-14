@@ -24,6 +24,7 @@ from __future__ import annotations
 import math
 import os
 import sys
+import threading
 import time
 import types
 
@@ -142,6 +143,8 @@ class SimuladorOficial:
         self.seguidor_pelota = None
         self.mision = None
         self._pedido_reinicio = False
+        self._lock_datos = threading.Lock()
+        self._hilo_percepcion = None
         if self.mision_parque:
             self.mision = self._crear_mision()
         if self.seguir_pelota:
@@ -350,6 +353,10 @@ class SimuladorOficial:
 
     # ---------- pose ----------
     def _escribir_pose(self):
+        with self._lock_datos:
+            self._escribir_pose_sin_lock()
+
+    def _escribir_pose_sin_lock(self):
         e = self.mundo.leer()
         q = self.data.qpos
 
@@ -452,7 +459,83 @@ class SimuladorOficial:
                     self.data.mocap_pos[mocap, 2] = 0.0
                     break
 
+    # ---------- percepción (cámara) ----------
+    # Con ventana 3D la captura corre en un HILO APARTE. Cada captura son 3
+    # renders sincrónicos (profundidad, ID de geometría y RGB) y en GPU/drivers
+    # lentos tardan 100-300 ms: hechos en el hilo del visor, la ventana bajaba a
+    # ~5 cuadros/s y el robot avanzaba a tirones. Así el visor y el seguimiento
+    # de ruta (50 Hz) no esperan a la cámara.
+    def _iniciar_hilo_percepcion(self):
+        self._pc_parar = threading.Event()
+        self._pc_lock = threading.Lock()
+        self._pc_resultado = None
+        self._pc_ultimo = 0
+        self._pc_error = None
+        self._hilo_percepcion = threading.Thread(
+            target=self._bucle_percepcion, name="percepcion-go2", daemon=True)
+        self._hilo_percepcion.start()
+
+    def _detener_hilo_percepcion(self):
+        if getattr(self, "_hilo_percepcion", None) is not None:
+            self._pc_parar.set()
+            self._hilo_percepcion.join(timeout=3.0)
+            self._hilo_percepcion = None
+
+    def _bucle_percepcion(self):
+        camara = None
+        try:
+            from .camara_go2 import (CamaraGo2, detectar_objetos_segmentados,
+                                     validar_pelota_con_rgb)
+            # El Renderer (contexto OpenGL) se crea y se usa SOLO en este hilo.
+            camara = CamaraGo2(self.model)
+            datos = self.mj.MjData(self.model)
+            contador = 0
+            while not self._pc_parar.is_set():
+                inicio = time.perf_counter()
+                with self._lock_datos:          # copia consistente de la pose
+                    datos.qpos[:] = self.data.qpos
+                    if self.model.nmocap:
+                        datos.mocap_pos[:] = self.data.mocap_pos
+                        datos.mocap_quat[:] = self.data.mocap_quat
+                    pose = self.mundo.leer()
+                self.mj.mj_forward(self.model, datos)
+                frame, profundidad, segmentacion = camara.capturar_sensores(datos)
+                percibidas = detectar_objetos_segmentados(
+                    segmentacion, profundidad, self.model, self.mj)
+                validas, descartadas = validar_pelota_con_rgb(percibidas, frame)
+                contador += 1
+                with self._pc_lock:
+                    self._pc_resultado = (contador, frame, validas, descartadas, pose)
+                resto = 0.10 - (time.perf_counter() - inicio)
+                if resto > 0:
+                    self._pc_parar.wait(resto)
+        except Exception as exc:                 # se informa desde el hilo principal
+            self._pc_error = exc
+        finally:
+            if camara is not None:
+                try:
+                    camara.close()
+                except Exception:
+                    pass
+
     def _paso_seguimiento_visual(self):
+        if getattr(self, "_hilo_percepcion", None) is not None:
+            # Modo ventana: sólo se consume el último resultado ya calculado.
+            if self._pc_error is not None:
+                self._falla_percepcion(self._pc_error)
+                self._pc_error = None
+                return
+            with self._pc_lock:
+                resultado = self._pc_resultado
+            if resultado is None or resultado[0] == self._pc_ultimo:
+                return
+            self._pc_ultimo = resultado[0]
+            _, frame, validas, descartadas, pose_captura = resultado
+            try:
+                self._procesar_percepcion(frame, validas, descartadas, pose_captura)
+            except Exception as exc:
+                self._falla_percepcion(exc)
+            return
         if time.monotonic() - self._ultima_captura_camara < 0.10:
             return
         self._ultima_captura_camara = time.monotonic()
@@ -461,61 +544,68 @@ class SimuladorOficial:
                 from .camara_go2 import CamaraGo2
                 self.camara = CamaraGo2(self.model)
             frame, profundidad, segmentacion = self.camara.capturar_sensores(self.data)
-            if self.vista_camara is None:
-                from .camara_go2 import VistaCamaraTk
-                self.vista_camara = VistaCamaraTk()
-                self.vista_camara.iniciar()
-            from .camara_go2 import (DeteccionPelota, detectar_objetos_segmentados,
-                                     validar_pelota_con_rgb)
+            from .camara_go2 import detectar_objetos_segmentados, validar_pelota_con_rgb
             percibidas = detectar_objetos_segmentados(
                 segmentacion, profundidad, self.model, self.mj)
-            self.ultima_percepcion, descartadas = validar_pelota_con_rgb(
-                percibidas, frame)
-            if descartadas:
-                self._pelotas_descartadas = getattr(self, "_pelotas_descartadas", 0) + descartadas
-                if self._pelotas_descartadas in (1, 10, 100, 1000):
-                    print(f"\n  [CAMARA] Pelota de la segmentación descartada por no "
-                          f"coincidir con la imagen RGB (total {self._pelotas_descartadas}).")
-            if self.mision is not None:
-                estado = self.mision.paso(self.ultima_percepcion)
-                estado_mostrar = f"MISION: {estado}"
-                if estado != getattr(self, "_estado_mision_reportado", None):
-                    print(f"\n  [MISION] {estado}: {self.mision.motivo}")
-                    self._estado_mision_reportado = estado
-                    if (estado in ("FINALIZADA", "ERROR", "BACKFLIP_SIMULADO",
-                                   "BACKFLIP_NO_DISPONIBLE",
-                                   "BACKFLIP_OMITIDO")
-                            and not getattr(self, "_metricas_mision_reportadas", False)):
-                        print(f"  [MISION] Métricas: {self.mision.metricas}")
-                        self._metricas_mision_reportadas = True
-            elif self.seguidor_pelota is not None:
-                pelota = next((obj for obj in self.ultima_percepcion
-                               if obj.categoria == "pelota"), None)
-                deteccion = (None if pelota is None else DeteccionPelota(
-                    pelota.centro_x, pelota.centro_y, pelota.bearing_rad,
-                    pelota.distancia_m, pelota.pixeles))
-                self.seguidor_pelota.paso(deteccion)
-                estado_mostrar = f"SEGUIDOR: {self.seguidor_pelota.estado}"
-                if deteccion is None and not getattr(self, "_pelota_perdida_reportada", False):
-                    print("\n  [CAMARA] Pelota no visible; Go2 detenido por seguridad.")
-                    self._pelota_perdida_reportada = True
-                elif deteccion is not None:
-                    self._pelota_perdida_reportada = False
-            pose_actual = self.mundo.leer()
-            estado_mostrar += (f" | Go2 {pose_actual['accion']}: "
-                               f"{pose_actual['velocidad_m_s']:.1f} m/s")
-            self.vista_camara.publicar(
-                frame, self.ultima_percepcion, estado=estado_mostrar)
+            validas, descartadas = validar_pelota_con_rgb(percibidas, frame)
+            self._procesar_percepcion(frame, validas, descartadas, None)
         except Exception as exc:
-            self.mundo.detener()
-            if self.mision is not None:
-                self.mision.estado = "ERROR"
-                self.mision.motivo = str(exc)
-            elif self.seguidor_pelota is not None:
-                self.seguidor_pelota.estado = "error"
-            print(f"\n  [CAMARA] Error de captura/detección: {exc}; Go2 detenido.")
-            self.seguidor_pelota = None
-            self.mision = None
+            self._falla_percepcion(exc)
+
+    def _procesar_percepcion(self, frame, validas, descartadas, pose_captura):
+        """Lógica liviana con el resultado de la cámara (hilo principal)."""
+        from .camara_go2 import DeteccionPelota
+        if self.vista_camara is None:
+            from .camara_go2 import VistaCamaraTk
+            self.vista_camara = VistaCamaraTk()
+            self.vista_camara.iniciar()
+        self.ultima_percepcion = validas
+        if descartadas:
+            self._pelotas_descartadas = getattr(self, "_pelotas_descartadas", 0) + descartadas
+            if self._pelotas_descartadas in (1, 10, 100, 1000):
+                print(f"\n  [CAMARA] Pelota de la segmentación descartada por no "
+                      f"coincidir con la imagen RGB (total {self._pelotas_descartadas}).")
+        estado_mostrar = ""
+        if self.mision is not None:
+            estado = self.mision.paso(self.ultima_percepcion, pose_captura=pose_captura)
+            estado_mostrar = f"MISION: {estado}"
+            if estado != getattr(self, "_estado_mision_reportado", None):
+                print(f"\n  [MISION] {estado}: {self.mision.motivo}")
+                self._estado_mision_reportado = estado
+                if (estado in ("FINALIZADA", "ERROR", "BACKFLIP_SIMULADO",
+                               "BACKFLIP_NO_DISPONIBLE", "BACKFLIP_OMITIDO")
+                        and not getattr(self, "_metricas_mision_reportadas", False)):
+                    print(f"  [MISION] Métricas: {self.mision.metricas}")
+                    self._metricas_mision_reportadas = True
+        elif self.seguidor_pelota is not None:
+            pelota = next((obj for obj in self.ultima_percepcion
+                           if obj.categoria == "pelota"), None)
+            deteccion = (None if pelota is None else DeteccionPelota(
+                pelota.centro_x, pelota.centro_y, pelota.bearing_rad,
+                pelota.distancia_m, pelota.pixeles))
+            self.seguidor_pelota.paso(deteccion)
+            estado_mostrar = f"SEGUIDOR: {self.seguidor_pelota.estado}"
+            if deteccion is None and not getattr(self, "_pelota_perdida_reportada", False):
+                print("\n  [CAMARA] Pelota no visible; Go2 detenido por seguridad.")
+                self._pelota_perdida_reportada = True
+            elif deteccion is not None:
+                self._pelota_perdida_reportada = False
+        pose_actual = self.mundo.leer()
+        estado_mostrar += (f" | Go2 {pose_actual['accion']}: "
+                           f"{pose_actual['velocidad_m_s']:.1f} m/s")
+        self.vista_camara.publicar(frame, self.ultima_percepcion, estado=estado_mostrar)
+
+    def _falla_percepcion(self, exc):
+        self.mundo.detener()
+        if self.mision is not None:
+            self.mision.estado = "ERROR"
+            self.mision.motivo = str(exc)
+        elif self.seguidor_pelota is not None:
+            self.seguidor_pelota.estado = "error"
+        print(f"\n  [CAMARA] Error de captura/detección: {exc}; Go2 detenido.")
+        self.seguidor_pelota = None
+        self.mision = None
+
     def _detener_si_hay_contacto(self):
         """Detiene el mundo si la pose cinemática entra en un obstáculo MJCF."""
         for indice in range(self.data.ncon):
@@ -620,6 +710,8 @@ class SimuladorOficial:
                     pose0 = self.mundo.leer()
                     cam_xy = [pose0["x"], pose0["y"]]
             self.iniciar_transporte()
+            if self.seguidor_pelota is not None or self.mision is not None:
+                self._iniciar_hilo_percepcion()
             periodo = self.cfg.VIEWER_DT
             t_cam = time.perf_counter()
             if 'cam_xy' not in dir():
@@ -660,6 +752,7 @@ class SimuladorOficial:
                 resto = periodo - (time.perf_counter() - inicio)
                 if resto > 0:
                     time.sleep(resto)
+            self._detener_hilo_percepcion()
 
     def correr_sin_ventana(self):
         """El bucle cuando no hay ventana 3D. Dibuja el recorrido en texto.
