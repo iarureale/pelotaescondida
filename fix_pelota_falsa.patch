@@ -1,0 +1,132 @@
+diff --git a/TP07_Inteligencia_Artificial/entorno/sim/arrancar.py b/TP07_Inteligencia_Artificial/entorno/sim/arrancar.py
+index 92b2079..e7e4925 100644
+--- a/TP07_Inteligencia_Artificial/entorno/sim/arrancar.py
++++ b/TP07_Inteligencia_Artificial/entorno/sim/arrancar.py
+@@ -465,9 +465,17 @@ class SimuladorOficial:
+                 from .camara_go2 import VistaCamaraTk
+                 self.vista_camara = VistaCamaraTk()
+                 self.vista_camara.iniciar()
+-            from .camara_go2 import DeteccionPelota, detectar_objetos_segmentados
+-            self.ultima_percepcion = detectar_objetos_segmentados(
++            from .camara_go2 import (DeteccionPelota, detectar_objetos_segmentados,
++                                     validar_pelota_con_rgb)
++            percibidas = detectar_objetos_segmentados(
+                 segmentacion, profundidad, self.model, self.mj)
++            self.ultima_percepcion, descartadas = validar_pelota_con_rgb(
++                percibidas, frame)
++            if descartadas:
++                self._pelotas_descartadas = getattr(self, "_pelotas_descartadas", 0) + descartadas
++                if self._pelotas_descartadas in (1, 10, 100, 1000):
++                    print(f"\n  [CAMARA] Pelota de la segmentación descartada por no "
++                          f"coincidir con la imagen RGB (total {self._pelotas_descartadas}).")
+             if self.mision is not None:
+                 estado = self.mision.paso(self.ultima_percepcion)
+                 estado_mostrar = f"MISION: {estado}"
+diff --git a/TP07_Inteligencia_Artificial/entorno/sim/camara_go2.py b/TP07_Inteligencia_Artificial/entorno/sim/camara_go2.py
+index 7761d3c..b6ac60c 100644
+--- a/TP07_Inteligencia_Artificial/entorno/sim/camara_go2.py
++++ b/TP07_Inteligencia_Artificial/entorno/sim/camara_go2.py
+@@ -211,6 +211,42 @@ def detectar_objetos_segmentados(segmentacion, profundidad, model, mujoco,
+     return detecciones
+ 
+ 
++def validar_pelota_con_rgb(detecciones, rgb, diametro_m: float = 0.20,
++                           fovy_deg: float = 60.0):
++    """Descarta "pelotas" de la segmentación que la imagen RGB no respalda.
++
++    La segmentación decodifica el ID de geometría desde un buffer de color. En
++    algunas GPU/drivers los bordes de objetos cercanos (p. ej. el propio cuerpo
++    del Go2) salen mezclados y pueden decodificar exactamente el ID de la
++    pelota: una "pelota" falsa a pocos centímetros de la cámara. La pelota real
++    es una esfera roja de 0,20 m, así que se exige (1) píxeles rojos dentro de
++    su caja y (2) que el diámetro aparente sea coherente con la profundidad.
++    Devuelve (detecciones_validas, cantidad_descartada).
++    """
++    import numpy as np
++
++    imagen = np.asarray(rgb)
++    alto = imagen.shape[0]
++    focal_px = alto / (2.0 * math.tan(math.radians(fovy_deg) / 2.0))
++    validas, descartadas = [], 0
++    for obj in detecciones:
++        if obj.categoria != "pelota":
++            validas.append(obj)
++            continue
++        caja = imagen[obj.y_min:obj.y_max + 1, obj.x_min:obj.x_max + 1, :3]
++        caja = caja.astype(np.int16, copy=False)
++        r, g, b = caja[:, :, 0], caja[:, :, 1], caja[:, :, 2]
++        rojos = int(np.count_nonzero((r > 120) & (r > g * 1.3) & (r > b * 1.3)))
++        diametro_px = ((obj.x_max - obj.x_min + 1) + (obj.y_max - obj.y_min + 1)) / 2.0
++        esperado_m = diametro_m * focal_px / max(1.0, diametro_px)
++        coherente = 0.5 <= esperado_m / max(1e-6, obj.distancia_m) <= 2.0
++        if rojos >= max(3, 0.2 * obj.pixeles) and coherente:
++            validas.append(obj)
++        else:
++            descartadas += 1
++    return validas, descartadas
++
++
+ def _categoria_geometria(nombre: str | None) -> str | None:
+     if not nombre:
+         return None
+diff --git a/TP07_Inteligencia_Artificial/entorno/tests/test_validar_pelota.py b/TP07_Inteligencia_Artificial/entorno/tests/test_validar_pelota.py
+new file mode 100644
+index 0000000..a4c6b16
+--- /dev/null
++++ b/TP07_Inteligencia_Artificial/entorno/tests/test_validar_pelota.py
+@@ -0,0 +1,55 @@
++"""Validación cruzada segmentación-RGB de la pelota (falsos positivos de ID-color)."""
++import math
++import unittest
++
++import numpy as np
++
++from sim.camara_go2 import ObjetoPercibido, validar_pelota_con_rgb
++
++FOCAL = 480 / (2 * math.tan(math.radians(30)))
++
++
++def pelota(distancia, x=300, y=240, radio_px=None, pixeles=None):
++    radio_px = radio_px or max(1.0, 0.10 * FOCAL / distancia)
++    r = int(round(radio_px))
++    return ObjetoPercibido("nav_target_ball", "pelota", x, y, 0.0, distancia,
++                           pixeles or int(math.pi * radio_px ** 2),
++                           x - r, x + r, y - r, y + r)
++
++
++def imagen_con_disco(x, y, radio, color=(220, 30, 30)):
++    img = np.full((480, 640, 3), (120, 160, 90), dtype=np.uint8)
++    yy, xx = np.ogrid[:480, :640]
++    img[(xx - x) ** 2 + (yy - y) ** 2 <= radio ** 2] = color
++    return img
++
++
++class ValidarPelotaTests(unittest.TestCase):
++    def test_pelota_real_roja_y_coherente_se_conserva(self):
++        det = pelota(4.0)
++        radio = 0.10 * FOCAL / 4.0
++        validas, desc = validar_pelota_con_rgb([det], imagen_con_disco(300, 240, radio))
++        self.assertEqual((len(validas), desc), (1, 0))
++
++    def test_deteccion_sin_rojo_en_la_imagen_se_descarta(self):
++        det = pelota(0.4, radio_px=12)             # "pelota" pegada a la cámara
++        gris = np.full((480, 640, 3), 90, dtype=np.uint8)
++        validas, desc = validar_pelota_con_rgb([det], gris)
++        self.assertEqual((validas, desc), ([], 1))
++
++    def test_escala_incoherente_con_la_profundidad_se_descarta(self):
++        # Hay rojo, pero un objeto de 0,2 m a 0,4 m ocuparía ~100 px, no 4.
++        det = pelota(0.4, radio_px=2)
++        validas, desc = validar_pelota_con_rgb([det], imagen_con_disco(300, 240, 2))
++        self.assertEqual(desc, 1)
++
++    def test_otras_categorias_no_se_tocan(self):
++        arbol = ObjetoPercibido("nav_obstacle_arbol_1_1_tronco", "arbol", 1, 1,
++                                0.0, 2.0, 30, 0, 5, 0, 5)
++        validas, desc = validar_pelota_con_rgb(
++            [arbol], np.zeros((480, 640, 3), dtype=np.uint8))
++        self.assertEqual((validas, desc), ([arbol], 0))
++
++
++if __name__ == "__main__":
++    unittest.main()
