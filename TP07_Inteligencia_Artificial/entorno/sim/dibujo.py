@@ -8,6 +8,7 @@ Los mapas didácticos conservan el dibujo superpuesto.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -88,11 +89,41 @@ def dibujar(user_scn, mapa, mostrar_ruta: bool = True,
 
 
 # --- Ruta dinámica: solo lo que FALTA recorrer ---------------------------------
-Z_TRAZO = 0.06           # sobre el césped (cara superior 3,2 cm) y la plaza (1,8 cm)
-RADIO_TRAZO = 0.025
-PASO_TRAZO_M = 0.50      # distancia entre inicios de trazos
-LARGO_TRAZO_M = 0.30
-DESVANECER_M = 1.2       # el camino aparece de a poco desde el robot hacia adelante
+@dataclass(frozen=True)
+class EstiloRuta:
+    """Aspecto de la ruta. Cambiar el estilo no toca la lógica de navegación.
+
+    forma        "flecha" (chevrones ">" planos orientados con la ruta) o "trazo"
+                 (rayitas); ambas sirven para cualquier polilínea, recta o curva.
+    paso_m       distancia entre marcas a lo largo de la ruta
+    largo_m      largo de cada brazo de la flecha / de cada trazo
+    ancho_m      ancho del brazo / del trazo
+    apertura_rad semiángulo de la punta de la flecha
+    z            altura sobre el piso (sobre el césped, cara superior 3,2 cm)
+    color        RGBA base
+    desvanecer_m longitud del fundido cerca del robot
+    radio_esquina_m  radio con que se redondean las esquinas al DIBUJAR (0 = sin redondeo)
+    """
+    forma: str = "flecha"
+    paso_m: float = 0.80
+    largo_m: float = 0.40
+    ancho_m: float = 0.075
+    apertura_rad: float = math.radians(32)
+    z: float = 0.045
+    color: tuple = (1.0, 0.72, 0.05, 0.95)
+    desvanecer_m: float = 1.5
+    radio_esquina_m: float = 0.9
+
+
+ESTILO_FLECHAS = EstiloRuta()
+ESTILO_TRAZOS = EstiloRuta(forma="trazo", paso_m=0.50, largo_m=0.30, ancho_m=0.05,
+                           z=0.06, desvanecer_m=1.2, radio_esquina_m=0.0)
+# Alias de compatibilidad (estilo de rayitas).
+Z_TRAZO = ESTILO_TRAZOS.z
+RADIO_TRAZO = ESTILO_TRAZOS.ancho_m / 2
+PASO_TRAZO_M = ESTILO_TRAZOS.paso_m
+LARGO_TRAZO_M = ESTILO_TRAZOS.largo_m
+DESVANECER_M = ESTILO_TRAZOS.desvanecer_m
 
 
 def _acumulado(polilinea):
@@ -113,13 +144,73 @@ def _punto(polilinea, cum, s):
     return polilinea[-1]
 
 
-def trazos_ruta(polilinea, progreso_m: float):
+def _rumbo(polilinea, cum, s, ventana=0.15):
+    """Dirección (rad) de la ruta en el arco ``s``."""
+    (x0, y0) = _punto(polilinea, cum, s - ventana)
+    (x1, y1) = _punto(polilinea, cum, s + ventana)
+    return math.atan2(y1 - y0, x1 - x0)
+
+
+def suavizar_polilinea(polilinea, radio_m: float = 0.9, muestras: int = 6):
+    """Redondea cada esquina con una curva de radio acotado; conserva los extremos.
+
+    Solo es para dibujar: el seguidor recorta las esquinas unos 0,8-1 m por su
+    punto de mira, y la línea redondeada se parece más a lo que hace el robot que
+    el ángulo recto de A*. El recorte nunca supera la mitad de cada tramo, así
+    que los tramos cortos (diagonales de atajo) no se deforman.
+    """
+    pol = [tuple(p) for p in polilinea]
+    if radio_m <= 0 or len(pol) < 3:
+        return pol
+    salida = [pol[0]]
+    for i in range(1, len(pol) - 1):
+        (ax, ay), (vx, vy), (bx, by) = pol[i - 1], pol[i], pol[i + 1]
+        l1, l2 = math.hypot(vx - ax, vy - ay), math.hypot(bx - vx, by - vy)
+        if l1 < 1e-9 or l2 < 1e-9:
+            continue
+        d = min(radio_m, 0.5 * l1, 0.5 * l2)
+        p0 = (vx - (vx - ax) / l1 * d, vy - (vy - ay) / l1 * d)
+        p1 = (vx + (bx - vx) / l2 * d, vy + (by - vy) / l2 * d)
+        for k in range(muestras + 1):                    # Bézier cuadrática p0 -V- p1
+            t = k / muestras
+            salida.append(((1 - t) ** 2 * p0[0] + 2 * (1 - t) * t * vx + t * t * p1[0],
+                           (1 - t) ** 2 * p0[1] + 2 * (1 - t) * t * vy + t * t * p1[1]))
+    salida.append(pol[-1])
+    return salida
+
+
+def proyectar(polilinea, x: float, y: float, minimo_m: float = 0.0) -> float:
+    """Arco (m) del punto de la polilínea más cercano a (x, y), sin retroceder.
+
+    ``minimo_m`` evita que la proyección salte hacia atrás en cruces o cuando la
+    ruta pasa cerca de sí misma: solo se consideran puntos con arco >= minimo_m - 0,5.
+    """
+    cum = _acumulado(polilinea)
+    mejor, mejor_d = max(0.0, minimo_m), float("inf")
+    for k, ((ax, ay), (bx, by)) in enumerate(zip(polilinea, polilinea[1:])):
+        largo = cum[k + 1] - cum[k]
+        if cum[k + 1] < minimo_m - 0.5 or largo < 1e-9:
+            continue
+        t = ((x - ax) * (bx - ax) + (y - ay) * (by - ay)) / (largo * largo)
+        t = max(0.0, min(1.0, t))
+        d = math.hypot(x - (ax + (bx - ax) * t), y - (ay + (by - ay) * t))
+        if d < mejor_d:
+            mejor_d, mejor = d, max(minimo_m - 0.5, cum[k] + t * largo)
+    return mejor
+
+
+def _opacidad(distancia_m: float, desvanecer_m: float) -> float:
+    t = max(0.0, min(1.0, distancia_m / desvanecer_m))
+    return t * t * (3 - 2 * t)
+
+
+def trazos_ruta(polilinea, progreso_m: float, estilo: EstiloRuta = ESTILO_TRAZOS):
     """Trazos [(puntos, opacidad)] de la ruta que falta, con fundido progresivo.
 
     Los trazos están anclados a la ruta (no al robot): a medida que el robot
     avanza (``progreso_m``) cada trazo se acorta y desaparece al pasar sobre él,
-    y los que están más cerca del robot que ``DESVANECER_M`` salen translúcidos.
-    No queda nada dibujado detrás del robot.
+    y los más cercanos al robot que ``desvanecer_m`` salen translúcidos. No queda
+    nada dibujado detrás del robot.
     """
     if len(polilinea) < 2:
         return []
@@ -128,16 +219,15 @@ def trazos_ruta(polilinea, progreso_m: float):
     if not progreso_m < total - 0.02:      # llegó (o inf/NaN): no queda nada por mostrar
         return []
     trazos = []
-    k = max(0, int((progreso_m - LARGO_TRAZO_M) // PASO_TRAZO_M))
-    while k * PASO_TRAZO_M < total:
-        a = k * PASO_TRAZO_M
-        b = min(total, a + LARGO_TRAZO_M)
+    k = max(0, int((progreso_m - estilo.largo_m) // estilo.paso_m))
+    while k * estilo.paso_m < total:
+        a = k * estilo.paso_m
+        b = min(total, a + estilo.largo_m)
         k += 1
         if b <= progreso_m + 0.02:
             continue
         a = max(a, progreso_m)
-        t = max(0.0, min(1.0, ((a + b) / 2 - progreso_m) / DESVANECER_M))
-        opacidad = t * t * (3 - 2 * t)
+        opacidad = _opacidad((a + b) / 2 - progreso_m, estilo.desvanecer_m)
         if opacidad < 0.03:
             continue
         puntos = [_punto(polilinea, cum, a)]
@@ -147,27 +237,89 @@ def trazos_ruta(polilinea, progreso_m: float):
     return trazos
 
 
-def actualizar_ruta_pendiente(user_scn, n_base: int, polilinea, progreso_m: float) -> int:
-    """Escribe los trazos pendientes a partir de ``n_base`` y fija ``ngeom``.
+def flechas_ruta(polilinea, progreso_m: float, estilo: EstiloRuta = ESTILO_FLECHAS):
+    """Flechas [(x, y, rumbo, opacidad)] de la ruta que falta.
 
-    Con ``polilinea`` vacía borra la ruta (solo quedan las ``n_base`` geoms
-    estáticas). Reutiliza los mismos slots de geometría cada cuadro: no se
-    acumulan objetos. Devuelve el total de geoms en uso.
+    Cada flecha está anclada a la ruta (arco = k * paso). Desaparece por
+    completo cuando el robot pasa sobre ella y aparece con fundido a medida que
+    queda más lejos por delante; la última queda cerca del destino.
+    """
+    if len(polilinea) < 2:
+        return []
+    cum = _acumulado(polilinea)
+    total = cum[-1]
+    if not progreso_m < total - 0.05:
+        return []
+    flechas = []
+    k = max(0, int(progreso_m // estilo.paso_m))
+    while True:
+        s = (k + 0.5) * estilo.paso_m
+        k += 1
+        if s > total - 0.10:
+            break
+        if s <= progreso_m + 0.05:
+            continue
+        opacidad = _opacidad(s - progreso_m, estilo.desvanecer_m)
+        if opacidad < 0.04:
+            continue
+        x, y = _punto(polilinea, cum, s)
+        flechas.append((x, y, _rumbo(polilinea, cum, s), opacidad))
+    return flechas
+
+
+def _agregar_geom(user_scn, n, tipo, tamano, pos, mat, rgba):
+    import mujoco
+    if n >= user_scn.maxgeom:
+        return n
+    mujoco.mjv_initGeom(user_scn.geoms[n], tipo, np.asarray(tamano, dtype=np.float64),
+                        np.asarray(pos, dtype=np.float64), np.asarray(mat, dtype=np.float64),
+                        np.asarray(rgba, dtype=np.float32))
+    return n + 1
+
+
+def actualizar_ruta_pendiente(user_scn, n_base: int, polilinea, progreso_m: float,
+                              estilo: EstiloRuta = ESTILO_FLECHAS) -> int:
+    """Escribe la ruta pendiente a partir de ``n_base`` y fija ``ngeom``.
+
+    ``polilinea`` y ``progreso_m`` deben estar en la MISMA polilínea (la que se
+    dibuja; ver ``suavizar_polilinea`` y ``proyectar``). Con polilínea vacía
+    borra la ruta (solo quedan las ``n_base`` geoms estáticas). Reutiliza los
+    mismos slots cada cuadro: no se acumulan objetos. Devuelve el total en uso.
     """
     import mujoco
 
     n = n_base
-    for puntos, opacidad in (trazos_ruta(polilinea, progreso_m) if polilinea else []):
-        color = COLOR_RUTA.copy()
-        color[3] = 0.95 * opacidad
-        for (ax, ay), (bx, by) in zip(puntos, puntos[1:]):
-            if n >= user_scn.maxgeom:
-                break
-            geom = user_scn.geoms[n]
-            mujoco.mjv_initGeom(geom, mujoco.mjtGeom.mjGEOM_CAPSULE,
-                                np.zeros(3), np.zeros(3), IDENTIDAD, color)
-            mujoco.mjv_connector(geom, mujoco.mjtGeom.mjGEOM_CAPSULE, RADIO_TRAZO,
-                                 np.array([ax, ay, Z_TRAZO]), np.array([bx, by, Z_TRAZO]))
-            n += 1
+    if not polilinea:
+        user_scn.ngeom = n
+        return n
+    if estilo.forma == "flecha":
+        for x, y, rumbo, opacidad in flechas_ruta(polilinea, progreso_m, estilo):
+            escala = 0.55 + 0.45 * opacidad           # también se achican al acercarse
+            largo, ancho = estilo.largo_m * escala, estilo.ancho_m * escala
+            cuerpo = largo * math.cos(estilo.apertura_rad)
+            punta = (x + 0.5 * cuerpo * math.cos(rumbo), y + 0.5 * cuerpo * math.sin(rumbo))
+            color = list(estilo.color)
+            color[3] = estilo.color[3] * opacidad
+            for lado in (1.0, -1.0):                    # los dos brazos del chevrón ">"
+                psi = rumbo + math.pi + lado * estilo.apertura_rad
+                c, s_ = math.cos(psi), math.sin(psi)
+                centro = (punta[0] + 0.5 * largo * c, punta[1] + 0.5 * largo * s_, estilo.z)
+                n = _agregar_geom(user_scn, n, mujoco.mjtGeom.mjGEOM_BOX,
+                                  [largo / 2, ancho / 2, 0.004], centro,
+                                  [c, -s_, 0, s_, c, 0, 0, 0, 1], color)
+    else:
+        for puntos, opacidad in trazos_ruta(polilinea, progreso_m, estilo):
+            color = np.array(estilo.color, dtype=np.float32)
+            color[3] = estilo.color[3] * opacidad
+            for (ax, ay), (bx, by) in zip(puntos, puntos[1:]):
+                if n >= user_scn.maxgeom:
+                    break
+                geom = user_scn.geoms[n]
+                mujoco.mjv_initGeom(geom, mujoco.mjtGeom.mjGEOM_CAPSULE,
+                                    np.zeros(3), np.zeros(3), IDENTIDAD, color)
+                mujoco.mjv_connector(geom, mujoco.mjtGeom.mjGEOM_CAPSULE,
+                                     estilo.ancho_m / 2,
+                                     np.array([ax, ay, estilo.z]), np.array([bx, by, estilo.z]))
+                n += 1
     user_scn.ngeom = n
     return n

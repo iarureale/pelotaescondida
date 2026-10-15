@@ -337,6 +337,10 @@ def _superficies_patio(mapa, ancho, alto, cx, cy) -> list[str]:
         'contype="0" conaffinity="0"/>',
     ])
     piezas.extend(_arquitectura_patio(ancho, alto, cx, cy))
+    # Letreros de las facultades (datos del mapa; ver sim/letreros_go2.py).
+    from .letreros_go2 import geoms_letreros
+    piezas.extend(geoms_letreros(
+        (getattr(mapa, "escenario", {}) or {}).get("letreros", []), ancho, alto, cx, cy))
     return piezas
 
 

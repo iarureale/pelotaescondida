@@ -1222,6 +1222,43 @@
         ],
         "variante": 3
       }
+    ],
+    "letreros": [
+      {
+        "lado": "este",
+        "texto": "FACO",
+        "x_m": -7.75,
+        "piso": 4,
+        "altura_m": 0.8
+      },
+      {
+        "lado": "este",
+        "texto": "FACE",
+        "x_m": -10.35,
+        "piso": 3,
+        "altura_m": 0.8
+      },
+      {
+        "lado": "este",
+        "texto": "UBS",
+        "x_m": -8.15,
+        "piso": 2,
+        "altura_m": 0.8
+      },
+      {
+        "lado": "este",
+        "texto": "FASA",
+        "x_m": -12.35,
+        "piso": 2,
+        "altura_m": 0.8
+      },
+      {
+        "lado": "este",
+        "texto": "FAIN",
+        "x_m": -11.95,
+        "piso": 1,
+        "altura_m": 0.8
+      }
     ]
   }
 }

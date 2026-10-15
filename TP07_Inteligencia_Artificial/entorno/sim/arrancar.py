@@ -145,6 +145,10 @@ class SimuladorOficial:
         self._pedido_reinicio = False
         self._n_dibujo_base = 0
         self._ruta_visible = False
+        self._ruta_vertices = ()
+        self._ruta_dibujo = []
+        self._ruta_progreso = 0.0
+        self.estilo_ruta = None        # EstiloRuta de sim/dibujo.py; None = flechas
         self._lock_datos = threading.Lock()
         self._hilo_percepcion = None
         if self.mision_parque:
@@ -903,18 +907,31 @@ class SimuladorOficial:
         La polilínea sale del propio navegador (la que el robot sigue), no de una
         línea aparte; al llegar, replanificar sin ruta o terminar, se borra.
         """
-        from .dibujo import actualizar_ruta_pendiente
+        from .dibujo import (ESTILO_FLECHAS, actualizar_ruta_pendiente, proyectar,
+                             suavizar_polilinea)
         nav = getattr(self.mision, "navegador", None) if self.mision else None
         activa = (nav is not None and self.mision.estado in self._ESTADOS_CON_RUTA
                   and nav.estado not in ("completado", "error", "detenido"))
         if not activa and not self._ruta_visible:
             return                      # nada que dibujar ni que borrar
+        estilo = self.estilo_ruta or ESTILO_FLECHAS
+        if activa:
+            vertices = tuple(nav.polilinea())
+            if vertices != self._ruta_vertices:         # ruta nueva (replan / reinicio)
+                self._ruta_vertices = vertices
+                self._ruta_dibujo = suavizar_polilinea(vertices, estilo.radio_esquina_m)
+                self._ruta_progreso = 0.0
+            pose = self.mundo.leer()
+            # Progreso sobre la polilínea DIBUJADA (con esquinas redondeadas), sin retroceder.
+            self._ruta_progreso = max(self._ruta_progreso, proyectar(
+                self._ruta_dibujo, pose["x"], pose["y"], self._ruta_progreso))
         with v.lock():
             if activa:
                 actualizar_ruta_pendiente(v.user_scn, self._n_dibujo_base,
-                                          nav.polilinea(), nav.progreso_m())
+                                          self._ruta_dibujo, self._ruta_progreso, estilo)
             else:
-                actualizar_ruta_pendiente(v.user_scn, self._n_dibujo_base, [], 0.0)
+                actualizar_ruta_pendiente(v.user_scn, self._n_dibujo_base, [], 0.0, estilo)
+                self._ruta_vertices = ()
         self._ruta_visible = activa
 
     def _ruta_cambio(self) -> bool:

@@ -97,11 +97,21 @@ frena para las esquinas. La velocidad baja al aproximarse al objetivo.
   Sigue siendo una animación cinemática; no usa el controlador oficial ni
   SportClient.
 - **Camino que se borra.** Solo se dibuja la ruta que falta (`dibujo.py`):
-  trazos anclados a la polilínea que sigue el navegador (la misma, no una línea
-  aparte), que se acortan y desaparecen al pasar el robot, con fundido de 1,2 m
-  frente a él. Al llegar o terminar, se borra. Reutiliza los mismos slots cada
+  flechas planas (chevrones ">") orientadas con la ruta y ancladas a la
+  polilínea que sigue el navegador (la misma, no una línea aparte), que
+  desaparecen al pasar el robot, con fundido de 1,5 m frente a él. Las esquinas
+  se redondean (radio 0,9 m) para parecerse al recorrido real. El aspecto es un
+  `EstiloRuta` (forma, paso, tamaño, color, fundido, radio): `ESTILO_FLECHAS` por
+  defecto, `ESTILO_TRAZOS` (rayitas) o uno propio asignado a `sim.estilo_ruta`.
+  Sirve para cualquier polilínea. Al llegar o terminar, se borra. Reutiliza los mismos slots cada
   cuadro. En el patio UADE además se omiten ~720 baldosas del visor que
   quedaban bajo la plaza.
+- **Letreros.** `sim/letreros_go2.py` arma textos sobre las fachadas con una
+  fuente de trazos (cápsulas sin colisión) sobre una franja de vidrio oscuro,
+  sin texturas ni librerías de imágenes. Se declaran en el mapa
+  (`escenario.letreros`: `lado`, `texto`, `x_m`, `piso`, `altura_m`). El patio UADE
+  lleva FACO, FACE, UBS, FASA y FAIN en la fachada este (la pared derecha) con la disposición
+  escalonada de la foto. Letras disponibles: A B C D E F I L M N O P R S T U Y.
 - **Cámara 3D.** Seguimiento suavizado a 6 m; la rueda del mouse acerca o aleja.
 
 ## Modos por separado

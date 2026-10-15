@@ -66,9 +66,9 @@ class EscenaTests(unittest.TestCase):
         cls.mj = mujoco
         cls.model = mujoco.MjModel.from_xml_string("<mujoco><worldbody/></mujoco>")
 
-    def test_escribe_capsulas_sobre_el_piso_y_reutiliza_los_slots(self):
+    def test_estilo_trazos_escribe_capsulas_sobre_el_piso_y_reutiliza_los_slots(self):
         scn = self.mj.MjvScene(self.model, maxgeom=500)
-        n1 = dibujo.actualizar_ruta_pendiente(scn, 20, L, 0.0)
+        n1 = dibujo.actualizar_ruta_pendiente(scn, 20, L, 0.0, dibujo.ESTILO_TRAZOS)
         self.assertGreater(n1, 20)
         for i in range(20, n1):
             g = scn.geoms[i]
@@ -77,7 +77,7 @@ class EscenaTests(unittest.TestCase):
             self.assertGreater(g.pos[2] - dibujo.RADIO_TRAZO, 0.032)    # sobre el césped
         # Muchos cuadros seguidos no acumulan geometrías.
         for p in [i * 0.1 for i in range(200)]:
-            n = dibujo.actualizar_ruta_pendiente(scn, 20, L, p)
+            n = dibujo.actualizar_ruta_pendiente(scn, 20, L, p, dibujo.ESTILO_TRAZOS)
             self.assertLessEqual(n, n1 + 2)
         self.assertEqual(scn.ngeom, n)
 
@@ -102,6 +102,105 @@ class EscenaTests(unittest.TestCase):
                              mostrar_baldosas=False)
         self.assertGreater(con, 700)
         self.assertLess(sin, 10)
+
+
+class FlechasTests(unittest.TestCase):
+    """Estilo por defecto: flechas planas orientadas con la ruta."""
+
+    def test_flechas_siguen_la_direccion_de_cada_tramo(self):
+        fl = dibujo.flechas_ruta(L, 0.0)
+        self.assertGreater(len(fl), 10)
+        self.assertLessEqual(len(fl), 16 / dibujo.ESTILO_FLECHAS.paso_m + 1)   # no se acumulan
+        for x, y, rumbo, _ in fl:
+            if y < 1e-6 and x < 9.5:                       # primer tramo: hacia +x
+                self.assertAlmostEqual(rumbo, 0.0, places=3)
+            if x > 10.5 - 1e-6 and y > 0.5:                # último tramo: hacia +y
+                self.assertAlmostEqual(rumbo, math.pi / 2, places=3)
+
+    def test_las_flechas_de_atras_desaparecen_y_las_cercanas_se_desvanecen(self):
+        for progreso in (0.0, 3.3, 9.0, 12.0):
+            for x, y, _, op in dibujo.flechas_ruta(L, progreso):
+                s = x if y < 1e-6 else 10.0 + y
+                self.assertGreater(s, progreso)             # nada detrás del robot
+        fl = dibujo.flechas_ruta(L, 5.0)
+        self.assertLess(fl[0][3], fl[-1][3])                # la más cercana, más tenue
+        self.assertGreater(fl[-1][3], 0.99)
+
+    def test_al_llegar_no_queda_ninguna_flecha(self):
+        for p in (15.96, 16.0, float("inf")):
+            self.assertEqual(dibujo.flechas_ruta(L, p), [])
+
+    def test_aparicion_y_desaparicion_continuas(self):
+        # Suma de opacidad: no salta al avanzar 2 cm.
+        previo, p = None, 0.0
+        while p < 16.0:
+            total = sum(op for *_, op in dibujo.flechas_ruta(L, p))
+            if previo is not None:
+                self.assertLess(abs(total - previo), 0.6, f"salto en {p:.2f}")
+            previo, p = total, p + 0.02
+
+    def test_geometria_de_la_flecha_es_un_chevron_plano_sobre_el_piso(self):
+        import mujoco
+        modelo = mujoco.MjModel.from_xml_string("<mujoco><worldbody/></mujoco>")
+        scn = mujoco.MjvScene(modelo, maxgeom=800)
+        n = dibujo.actualizar_ruta_pendiente(scn, 10, L, 0.0)
+        fl = dibujo.flechas_ruta(L, 0.0)
+        self.assertEqual(n - 10, 2 * len(fl))                # 2 brazos por flecha
+        est = dibujo.ESTILO_FLECHAS
+        for i in range(10, n):
+            g = scn.geoms[i]
+            self.assertEqual(g.type, mujoco.mjtGeom.mjGEOM_BOX)
+            self.assertAlmostEqual(g.pos[2], est.z, places=6)
+            self.assertLess(g.size[2], 0.005)                # plana
+            self.assertGreater(g.pos[2] - g.size[2], 0.032)  # sobre el césped
+        # Primera flecha (a lo largo de +x): los brazos quedan a ambos lados y detrás de la punta.
+        a, b = scn.geoms[10], scn.geoms[11]
+        self.assertAlmostEqual(a.pos[1] + b.pos[1], 2 * fl[0][1], places=3)   # simétricos en y
+        self.assertGreater(abs(a.pos[1] - b.pos[1]), 0.1)
+        for _ in range(100):                                 # sin acumulación
+            n2 = dibujo.actualizar_ruta_pendiente(scn, 10, L, _ * 0.1)
+            self.assertLessEqual(n2, n)
+
+    def test_estilo_configurable_y_ruta_vacia(self):
+        import mujoco
+        modelo = mujoco.MjModel.from_xml_string("<mujoco><worldbody/></mujoco>")
+        scn = mujoco.MjvScene(modelo, maxgeom=800)
+        ancho = dibujo.EstiloRuta(paso_m=1.6, largo_m=0.5)
+        grande = dibujo.actualizar_ruta_pendiente(scn, 0, L, 0.0, dibujo.ESTILO_FLECHAS)
+        raro = dibujo.actualizar_ruta_pendiente(scn, 0, L, 0.0, ancho)
+        self.assertLess(raro, grande)
+        self.assertEqual(dibujo.actualizar_ruta_pendiente(scn, 7, [], 0.0), 7)
+
+
+class PolilineaTests(unittest.TestCase):
+    def test_suavizado_redondea_esquinas_y_conserva_extremos(self):
+        s = dibujo.suavizar_polilinea(L, 0.9)
+        self.assertEqual((s[0], s[-1]), (L[0], L[-1]))
+        self.assertLess(longitud(s), longitud(L))            # recorta la esquina
+        self.assertGreater(longitud(s), 0.97 * longitud(L))  # pero muy poco
+        # Solo se desvía cerca de la esquina (10, 0) y nunca más de ~0,4 m.
+        def dist(p):
+            return min(abs(p[1]) if 0 <= p[0] <= 10 else 99, abs(p[0] - 10) if 0 <= p[1] <= 6 else 99)
+        self.assertLess(max(dist(p) for p in s), 0.4)
+        self.assertTrue(all(dist(p) < 1e-9 for p in s if p[0] < 9.0 or p[1] > 1.0))
+        self.assertEqual(dibujo.suavizar_polilinea(L, 0.0), L)
+        self.assertEqual(dibujo.suavizar_polilinea([(0, 0), (1, 1)], 0.9), [(0, 0), (1, 1)])
+
+    def test_el_redondeo_no_deforma_tramos_cortos(self):
+        zigzag = [(0, 0), (0.6, 0), (0.6, 0.6), (1.2, 0.6)]    # tramos de 0,6 m
+        s = dibujo.suavizar_polilinea(zigzag, 0.9)
+        self.assertEqual((s[0], s[-1]), (zigzag[0], zigzag[-1]))
+        # el recorte es como mucho la mitad de cada tramo (0,3 m)
+        self.assertTrue(all(0 <= p[0] <= 1.2 and 0 <= p[1] <= 0.6 for p in s))
+
+    def test_proyectar_avanza_y_nunca_retrocede(self):
+        pol = dibujo.suavizar_polilinea(L, 2)
+        prog = 0.0
+        for x in [i * 0.1 for i in range(100)]:               # robot avanza por el primer tramo
+            prog = max(prog, dibujo.proyectar(pol, x, 0.05, prog))
+        self.assertGreater(prog, 8.5)
+        # Aunque la pose "vuelva" cerca del inicio, el mínimo manda.
+        self.assertGreaterEqual(dibujo.proyectar(pol, 0.5, 0.0, prog), prog - 0.5 - 1e-9)
 
 
 class ProgresoNavegadorTests(unittest.TestCase):
