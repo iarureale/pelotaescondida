@@ -7,6 +7,8 @@ Los mapas didácticos conservan el dibujo superpuesto.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 # Colores (RGBA). Pensados para que se distingan tambien en captura de pantalla.
@@ -23,8 +25,15 @@ IDENTIDAD = np.eye(3).flatten()
 
 
 def dibujar(user_scn, mapa, mostrar_ruta: bool = True,
-           mostrar_obstaculos: bool = True) -> int:
-    """Vuelca la grilla en la escena del visor. Devuelve cuantos geoms uso."""
+           mostrar_obstaculos: bool = True,
+           mostrar_baldosas: bool = True) -> int:
+    """Vuelca la grilla en la escena del visor. Devuelve cuantos geoms uso.
+
+    ``mostrar_baldosas=False`` omite las baldosas por celda: en el patio UADE su
+    cara superior (z=1,0 cm) queda bajo la plaza (z=1,8 cm), no se ven y solo
+    cuestan ~720 geoms por cuadro. La ruta dinámica se dibuja aparte con
+    ``actualizar_ruta_pendiente``.
+    """
     import mujoco
 
     n = 0
@@ -62,9 +71,10 @@ def dibujar(user_scn, mapa, mostrar_ruta: bool = True,
             else:
                 color = COLOR_LIBRE
 
-            _geom(mujoco.mjtGeom.mjGEOM_BOX,
-                  [media * 0.92, media * 0.92, ALTURA_PISO],
-                  [x, y, ALTURA_PISO], color)
+            if mostrar_baldosas:
+                _geom(mujoco.mjtGeom.mjGEOM_BOX,
+                      [media * 0.92, media * 0.92, ALTURA_PISO],
+                      [x, y, ALTURA_PISO], color)
 
     # La ruta calculada, como esferas encadenadas sobre el piso.
     if mostrar_ruta and mapa.ruta:
@@ -73,5 +83,91 @@ def dibujar(user_scn, mapa, mostrar_ruta: bool = True,
             _geom(mujoco.mjtGeom.mjGEOM_SPHERE,
                   [mapa.tamano_celda * 0.10] * 3, [x, y, 0.05], COLOR_RUTA)
 
+    user_scn.ngeom = n
+    return n
+
+
+# --- Ruta dinámica: solo lo que FALTA recorrer ---------------------------------
+Z_TRAZO = 0.06           # sobre el césped (cara superior 3,2 cm) y la plaza (1,8 cm)
+RADIO_TRAZO = 0.025
+PASO_TRAZO_M = 0.50      # distancia entre inicios de trazos
+LARGO_TRAZO_M = 0.30
+DESVANECER_M = 1.2       # el camino aparece de a poco desde el robot hacia adelante
+
+
+def _acumulado(polilinea):
+    cum = [0.0]
+    for (ax, ay), (bx, by) in zip(polilinea, polilinea[1:]):
+        cum.append(cum[-1] + math.hypot(bx - ax, by - ay))
+    return cum
+
+
+def _punto(polilinea, cum, s):
+    s = max(0.0, min(cum[-1], s))
+    for k in range(len(cum) - 1):
+        if s <= cum[k + 1] or k == len(cum) - 2:
+            largo = cum[k + 1] - cum[k]
+            t = 0.0 if largo < 1e-9 else (s - cum[k]) / largo
+            (ax, ay), (bx, by) = polilinea[k], polilinea[k + 1]
+            return ax + (bx - ax) * t, ay + (by - ay) * t
+    return polilinea[-1]
+
+
+def trazos_ruta(polilinea, progreso_m: float):
+    """Trazos [(puntos, opacidad)] de la ruta que falta, con fundido progresivo.
+
+    Los trazos están anclados a la ruta (no al robot): a medida que el robot
+    avanza (``progreso_m``) cada trazo se acorta y desaparece al pasar sobre él,
+    y los que están más cerca del robot que ``DESVANECER_M`` salen translúcidos.
+    No queda nada dibujado detrás del robot.
+    """
+    if len(polilinea) < 2:
+        return []
+    cum = _acumulado(polilinea)
+    total = cum[-1]
+    if not progreso_m < total - 0.02:      # llegó (o inf/NaN): no queda nada por mostrar
+        return []
+    trazos = []
+    k = max(0, int((progreso_m - LARGO_TRAZO_M) // PASO_TRAZO_M))
+    while k * PASO_TRAZO_M < total:
+        a = k * PASO_TRAZO_M
+        b = min(total, a + LARGO_TRAZO_M)
+        k += 1
+        if b <= progreso_m + 0.02:
+            continue
+        a = max(a, progreso_m)
+        t = max(0.0, min(1.0, ((a + b) / 2 - progreso_m) / DESVANECER_M))
+        opacidad = t * t * (3 - 2 * t)
+        if opacidad < 0.03:
+            continue
+        puntos = [_punto(polilinea, cum, a)]
+        puntos += [tuple(v) for v, c in zip(polilinea, cum) if a < c < b]   # esquinas
+        puntos.append(_punto(polilinea, cum, b))
+        trazos.append((puntos, opacidad))
+    return trazos
+
+
+def actualizar_ruta_pendiente(user_scn, n_base: int, polilinea, progreso_m: float) -> int:
+    """Escribe los trazos pendientes a partir de ``n_base`` y fija ``ngeom``.
+
+    Con ``polilinea`` vacía borra la ruta (solo quedan las ``n_base`` geoms
+    estáticas). Reutiliza los mismos slots de geometría cada cuadro: no se
+    acumulan objetos. Devuelve el total de geoms en uso.
+    """
+    import mujoco
+
+    n = n_base
+    for puntos, opacidad in (trazos_ruta(polilinea, progreso_m) if polilinea else []):
+        color = COLOR_RUTA.copy()
+        color[3] = 0.95 * opacidad
+        for (ax, ay), (bx, by) in zip(puntos, puntos[1:]):
+            if n >= user_scn.maxgeom:
+                break
+            geom = user_scn.geoms[n]
+            mujoco.mjv_initGeom(geom, mujoco.mjtGeom.mjGEOM_CAPSULE,
+                                np.zeros(3), np.zeros(3), IDENTIDAD, color)
+            mujoco.mjv_connector(geom, mujoco.mjtGeom.mjGEOM_CAPSULE, RADIO_TRAZO,
+                                 np.array([ax, ay, Z_TRAZO]), np.array([bx, by, Z_TRAZO]))
+            n += 1
     user_scn.ngeom = n
     return n

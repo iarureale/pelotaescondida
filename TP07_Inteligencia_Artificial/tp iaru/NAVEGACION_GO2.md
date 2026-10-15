@@ -81,6 +81,27 @@ frena para las esquinas. La velocidad baja al aproximarse al objetivo.
   visor y el seguimiento de ruta (50 Hz) no esperan al render. La misión usa la
   pose del instante del cuadro para proyectar la pelota. En una GPU lenta esto
   evita que la ventana baje a ~3-5 cuadros/s y el robot avance a tirones.
+- **Trote (`trote_go2.py`).** La locomoción es cinemática (no hay dinámica):
+  la pose de las patas se escribe en `qpos`. La marcha anterior eran senoides
+  sin relación con la velocidad y daba, medido sobre el modelo oficial con
+  `herramientas/diagnostico_marcha.py`: 0,87 pies apoyados (un trote tiene 2),
+  arrastre de 3,6-12,9 cm por apoyo, pies 2,9 cm bajo el piso y 13,5 cm en el
+  aire, cuerpo que solo subía, y saltos de fase de hasta 494 rad/s al acelerar
+  (fase acumulada × cadencia variable). Ahora cada pie sigue una trayectoria:
+  en apoyo queda fijo en el mundo (se mueve hacia atrás respecto del cuerpo a
+  v + ω×r), en balanceo describe un arco de 5,5 cm; los ángulos salen de
+  cinemática inversa analítica con la geometría y rangos del XML oficial
+  (verificada contra MuJoCo, error 0,000 mm). La frecuencia (1,6-3,8 Hz) crece
+  con la velocidad y la fase se integra de forma continua. Medido: 2,1 pies
+  apoyados, arrastre 0,0-0,8 cm, pie hasta 3 mm bajo el piso, cuerpo 33,0-33,8 cm.
+  Sigue siendo una animación cinemática; no usa el controlador oficial ni
+  SportClient.
+- **Camino que se borra.** Solo se dibuja la ruta que falta (`dibujo.py`):
+  trazos anclados a la polilínea que sigue el navegador (la misma, no una línea
+  aparte), que se acortan y desaparecen al pasar el robot, con fundido de 1,2 m
+  frente a él. Al llegar o terminar, se borra. Reutiliza los mismos slots cada
+  cuadro. En el patio UADE además se omiten ~720 baldosas del visor que
+  quedaban bajo la plaza.
 - **Cámara 3D.** Seguimiento suavizado a 6 m; la rueda del mouse acerca o aleja.
 
 ## Modos por separado
@@ -149,6 +170,9 @@ suelo exterior verde sin reflejos. No cambian colisiones, coordenadas ni la
 percepción (segmentación y profundidad no dependen de la luz).
 
 ## Mediciones reproducibles
+
+`python herramientas/diagnostico_marcha.py` mide pies apoyados, arrastre por
+apoyo y altura de pies/cuerpo sobre el modelo real de MuJoCo (reloj virtual).
 
 `python -u herramientas/e2e_reloj_virtual.py 120 2` corre la misión sin ventana
 con reloj virtual (resultado independiente de la CPU), repite con reinicio y

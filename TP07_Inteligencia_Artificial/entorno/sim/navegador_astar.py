@@ -31,6 +31,10 @@ class NavegadorAstar:
         ruta_control = _comprimir_tramos_rectos(ruta)
         celdas_objetivo = ruta_control[1:] if len(ruta_control) > 1 else ruta_control
         self.puntos = [mapa.a_mundo(*p) for p in celdas_objetivo]
+        p_inicio = mundo.leer()
+        # Polilínea fija de la ruta vigente (posición inicial + vértices): es la
+        # que se dibuja y la que se sigue, así que ambas coinciden siempre.
+        self._polilinea = [(p_inicio["x"], p_inicio["y"])] + list(self.puntos)
         self.tolerancia_m = tolerancia_m
         limite_autonomo = getattr(mundo, "velocidad_autonoma_max", None)
         self.velocidad_m_s = min(velocidad_m_s,
@@ -55,6 +59,25 @@ class NavegadorAstar:
     ACEL_ANGULAR = 5.0           # rad/s² (evita golpes de giro)
     VENTANA_ATASCO_S = 6.0
     PROGRESO_MIN_M = 0.20
+
+    def polilinea(self):
+        """Vértices (x, y) de la ruta que sigue el robot, desde donde arrancó."""
+        return list(self._polilinea)
+
+    def progreso_m(self) -> float:
+        """Metros recorridos sobre la polilínea (proyección de la pose actual)."""
+        if self.estado == "completado" or self.indice >= len(self._polilinea) - 1:
+            return float("inf")
+        pose = self.mundo.leer()
+        k = min(self.indice, len(self._polilinea) - 2)
+        recorrido = sum(math.hypot(b[0] - a[0], b[1] - a[1])
+                        for a, b in zip(self._polilinea[:k], self._polilinea[1:k + 1]))
+        (ax, ay), (bx, by) = self._polilinea[k], self._polilinea[k + 1]
+        largo = math.hypot(bx - ax, by - ay)
+        if largo < 1e-9:
+            return recorrido
+        t = ((pose["x"] - ax) * (bx - ax) + (pose["y"] - ay) * (by - ay)) / largo
+        return recorrido + max(0.0, min(largo, t))
 
     def _limites(self):
         w = (getattr(self.mundo, "velocidad_angular_autonoma_max", None)

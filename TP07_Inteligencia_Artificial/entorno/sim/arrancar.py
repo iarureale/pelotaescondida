@@ -143,6 +143,8 @@ class SimuladorOficial:
         self.seguidor_pelota = None
         self.mision = None
         self._pedido_reinicio = False
+        self._n_dibujo_base = 0
+        self._ruta_visible = False
         self._lock_datos = threading.Lock()
         self._hilo_percepcion = None
         if self.mision_parque:
@@ -162,6 +164,10 @@ class SimuladorOficial:
 
         self.telemetria = Telemetria(self.model.nu)
         self._qpos_previo = None
+        self._trote = None
+        if getattr(robot, "clave", None) == "go2":
+            from .trote_go2 import Trote
+            self._trote = Trote(robot.altura)
 
     # ---------- transporte ----------
     def iniciar_transporte(self):
@@ -366,8 +372,18 @@ class SimuladorOficial:
         media_yaw = e["yaw"] / 2.0
         fase_marcha = e["fase"] * e.get(
             "cadencia_marcha", self.robot.multiplicador_cadencia_marcha)
+        # Go2: trote con trayectoria de pies (sim/trote_go2.py). Los demás robots
+        # conservan su animación senoidal.
+        trote = self._trote
+        usar_trote = (trote is not None and e.get("de_pie", True)
+                      and e["accion"] not in ("saludando", "besando", "backflip_visual"))
+        angulos_trote, dz_trote = None, 0.0
+        if usar_trote:
+            angulos_trote, dz_trote = trote.calcular(
+                e["fase_trote"], e["vx"], e["vy"], e["vyaw"],
+                altura_base=q[2], t=time.perf_counter())
         pitch_carrera = (self.robot.inclinacion_marcha_rad * math.sin(fase_marcha)
-                         if e["moviendose"] else 0.0)
+                         if e["moviendose"] and not usar_trote else 0.0)
         if e["accion"] == "backflip_visual":
             # Gesto de presentación cinemático: arco y pitch completos de 360°.
             # No integra fuerzas ni se envía por SportClient al robot real.
@@ -380,7 +396,9 @@ class SimuladorOficial:
             q[5] = math.cos(media_yaw) * math.sin(media_pitch)
             q[6] = math.sin(media_yaw) * math.cos(media_pitch)
         else:
-            if e["moviendose"]:
+            if usar_trote:
+                q[2] += dz_trote        # los pies de apoyo se calculan con esta altura
+            elif e["moviendose"]:
                 q[2] += self.robot.rebote_marcha_m * (
                     0.5 - 0.5 * math.cos(2.0 * fase_marcha))
             media_pitch = pitch_carrera / 2.0
@@ -403,6 +421,11 @@ class SimuladorOficial:
             for idx, valor in self.robot.saludo.items():
                 if idx < len(art):
                     art[idx] = valor
+        elif usar_trote:
+            from .trote_go2 import INDICE
+            for pata, (q0, q1, q2) in angulos_trote.items():
+                i = INDICE[pata]
+                art[i], art[i + 1], art[i + 2] = q0, q1, q2
         elif e["moviendose"]:
             f = fase_marcha
             for idx, amplitud, desfase in self.robot.marcha:
@@ -688,8 +711,16 @@ class SimuladorOficial:
             if self.mapa is not None:
                 from .dibujo import dibujar
                 # Los obstáculos físicos ya están en el MJCF cuando se usa A*.
-                dibujar(v.user_scn, self.mapa,
-                            mostrar_obstaculos=not self.obstaculos_fisicos)
+                # Con misión, la ruta se dibuja aparte y dinámica (solo lo que
+                # falta recorrer); en el patio UADE las baldosas por celda quedan
+                # bajo la plaza, no se ven y se omiten.
+                self._n_dibujo_base = dibujar(
+                    v.user_scn, self.mapa,
+                    mostrar_ruta=self.mision is None,
+                    mostrar_obstaculos=not self.obstaculos_fisicos,
+                    mostrar_baldosas=not (self.mision is not None and getattr(
+                        self.mapa, "escenario", {}).get("patio_uade")))
+                self._ruta_visible = False
                 v.cam.distance = max(
                     3.0, (1.25 if getattr(self.mapa, "escenario", {}).get("patio_uade")
                           else 0.9) * max(self.mapa.filas, self.mapa.columnas)
@@ -744,7 +775,9 @@ class SimuladorOficial:
                 if self.seguidor_pelota is not None or self.mision is not None:
                     self._paso_seguimiento_visual()
                 self._volcar_avisos()
-                if self.mapa is not None and self._ruta_cambio():
+                if self.mapa is not None and self.mision is not None:
+                    self._actualizar_ruta_dinamica(v)
+                elif self.mapa is not None and self._ruta_cambio():
                     from .dibujo import dibujar
                     dibujar(v.user_scn, self.mapa,
                             mostrar_obstaculos=not self.obstaculos_fisicos)
@@ -859,6 +892,30 @@ class SimuladorOficial:
                 pass
 
     _ultima_ruta = None
+
+    # Estados de la misión en los que el robot sigue una ruta A*.
+    _ESTADOS_CON_RUTA = ("NAVEGANDO", "EXPLORANDO", "REPLANIFICANDO",
+                         "APROXIMANDO_PELOTA")
+
+    def _actualizar_ruta_dinamica(self, v):
+        """Dibuja SOLO el tramo pendiente de la ruta vigente y borra lo recorrido.
+
+        La polilínea sale del propio navegador (la que el robot sigue), no de una
+        línea aparte; al llegar, replanificar sin ruta o terminar, se borra.
+        """
+        from .dibujo import actualizar_ruta_pendiente
+        nav = getattr(self.mision, "navegador", None) if self.mision else None
+        activa = (nav is not None and self.mision.estado in self._ESTADOS_CON_RUTA
+                  and nav.estado not in ("completado", "error", "detenido"))
+        if not activa and not self._ruta_visible:
+            return                      # nada que dibujar ni que borrar
+        with v.lock():
+            if activa:
+                actualizar_ruta_pendiente(v.user_scn, self._n_dibujo_base,
+                                          nav.polilinea(), nav.progreso_m())
+            else:
+                actualizar_ruta_pendiente(v.user_scn, self._n_dibujo_base, [], 0.0)
+        self._ruta_visible = activa
 
     def _ruta_cambio(self) -> bool:
         actual = tuple(tuple(p) for p in self.mapa.ruta) if self.mapa.ruta else ()

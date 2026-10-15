@@ -48,6 +48,7 @@ class VistaNula:
     def iniciar(self): pass
 
 def correr(sim, mundo, limite_s):
+    lateral = []
     t0 = Reloj.t; estados = []; traza = []; max_salto = 0.0; prev = None
     giro_prev = 0.0; saltos_giro = 0.0; vel_prev = 0.0; saltos_v = 0.0
     while Reloj.t - t0 < limite_s:
@@ -58,6 +59,18 @@ def correr(sim, mundo, limite_s):
         sim._paso_seguimiento_visual()
         a = mundo.leer()
         est = sim.mision.estado
+        nav = getattr(sim.mision, "navegador", None)
+        if nav is not None and est in ("NAVEGANDO", "EXPLORANDO", "APROXIMANDO_PELOTA") \
+                and nav.estado == "navegando":
+            # Error lateral del robot respecto de la polilínea que se DIBUJA.
+            pol = nav.polilinea()
+            d = min(abs((bx - ax) * (a["y"] - ay) - (by - ay) * (a["x"] - ax))
+                    / max(1e-9, math.hypot(bx - ax, by - ay))
+                    if 0 <= ((a["x"] - ax) * (bx - ax) + (a["y"] - ay) * (by - ay))
+                    / max(1e-9, (bx - ax) ** 2 + (by - ay) ** 2) <= 1
+                    else min(math.hypot(a["x"] - ax, a["y"] - ay), math.hypot(a["x"] - bx, a["y"] - by))
+                    for (ax, ay), (bx, by) in zip(pol, pol[1:]))
+            lateral.append(d)
         if not estados or estados[-1][1] != est: estados.append((round(Reloj.t - t0, 1), est))
         traza.append((round(Reloj.t - t0, 1), a["x"], a["y"], a["yaw"], est))
         if prev is not None:
@@ -68,7 +81,7 @@ def correr(sim, mundo, limite_s):
         if est in FINALES:
             if not hasattr(sim, "_fin"): sim._fin = Reloj.t
             if Reloj.t - sim._fin > 3.0: break
-    return dict(estados=estados, traza=traza, max_salto_m=max_salto, duracion=Reloj.t - t0)
+    return dict(estados=estados, traza=traza, lateral=lateral, max_salto_m=max_salto, duracion=Reloj.t - t0)
 
 if __name__ == "__main__":
     lim = float(sys.argv[1]) if len(sys.argv) > 1 else 300
@@ -104,6 +117,10 @@ if __name__ == "__main__":
         print("estados:", r["estados"])
         print("final:", r["final"], "|", r["motivo"])
         print("métricas:", json.dumps({k: (round(v, 2) if isinstance(v, float) else v) for k, v in r["metricas"].items()}))
+        lat = r["lateral"]
+        if lat:
+            print("error lateral respecto de la ruta dibujada: medio %.3f m, máximo %.3f m (%d muestras)" %
+                  (sum(lat) / len(lat), max(lat), len(lat)))
         print("duración virtual %.1f s | pared %.0f s | salto máx/ciclo %.3f m | dist. final a pelota %.2f m" %
               (r["duracion"], r["pared_s"], r["max_salto_m"], r["dist_pelota"]))
     if reps > 1:

@@ -19,6 +19,7 @@ import math
 import threading
 import time
 
+from .trote_go2 import frecuencia_hz
 from .safety import (
     ErrorDeSeguridad,
     PerfilSeguridad,
@@ -54,6 +55,7 @@ class Mundo:
             self.vy = 0.0
             self.vyaw = 0.0
             self.fase = 0.0
+            self.fase_trote = 0.0
             self.accion = "quieto"
             self._vence_en = 0.0
             self._gesto_hasta = 0.0
@@ -255,6 +257,12 @@ class Mundo:
 
         rapidez = math.hypot(self.vx, self.vy) + 0.3 * abs(self.vyaw)
         self.fase += rapidez * 6.0 * efectivo
+        # Fase del trote del Go2: integra la FRECUENCIA de paso (que crece con la
+        # velocidad), de modo que la fase es continua. La fase de arriba se
+        # conserva para el G1; multiplicarla por una cadencia que cambia con la
+        # velocidad producía saltos de hasta ~490 rad/s al acelerar.
+        self.fase_trote = (self.fase_trote + 2.0 * math.pi * efectivo
+                           * frecuencia_hz(self.vx, self.vy, self.vyaw)) % (2.0 * math.pi)
 
     def leer(self) -> dict:
         with self._lock:
@@ -272,6 +280,8 @@ class Mundo:
                 "bateria": BATERIA_SIMULADA,
                 "moviendose": abs(self.vx) + abs(self.vy) + abs(self.vyaw) > 1e-6,
                 "fase": self.fase,
+                "fase_trote": self.fase_trote,
+                "vx": self.vx, "vy": self.vy, "vyaw": self.vyaw,
                 "cadencia_marcha": cadencia,
                 "gesto_progreso": (max(0.0, min(1.0,
                     (time.monotonic() - self._gesto_desde) / self._gesto_duracion))
