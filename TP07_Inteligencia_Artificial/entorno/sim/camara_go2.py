@@ -270,44 +270,74 @@ def _categoria_geometria(nombre: str | None) -> str | None:
 
 
 class SeguidorPelota:
-    """Control reactivo seguro: si pierde la pelota manda velocidad cero."""
+    """Aproximación final continua a la pelota; si la pierde, velocidad cero.
+
+    Avanza MIENTRAS corrige el rumbo (arco) y solo gira en el lugar si el error
+    angular es grande; la velocidad se frena de forma proporcional a la distancia
+    que falta y se suaviza con rampas. Las órdenes duran 0,4 s para no vencer
+    entre cuadros de cámara lentos (antes 0,15 s: el robot arrancaba y paraba).
+    """
+
+    ACEL_M_S2 = 1.8           # aceleración al arrancar
+    DECEL_M_S2 = 3.0          # al frenar
+    GIRO_EN_SITIO_RAD = 0.9   # por encima, gira sin avanzar
 
     def __init__(self, mundo, distancia_objetivo_m: float = 0.75):
         self.mundo = mundo
         self.distancia_objetivo_m = distancia_objetivo_m
         self.estado = "esperando"
         self.ultima_deteccion = None
+        self._v = None
+        self._t = None
+
+    def _velocidad_actual(self) -> float:
+        return float(getattr(self.mundo, "vx", 0.0))
+
+    def _rampa(self, objetivo: float) -> float:
+        import time
+        ahora = time.monotonic()
+        dt = 0.1 if self._t is None else max(0.02, min(0.3, ahora - self._t))
+        self._t = ahora
+        v = self._velocidad_actual() if self._v is None else self._v
+        paso = (self.ACEL_M_S2 if abs(objetivo) > abs(v) else self.DECEL_M_S2) * dt
+        v = max(v - paso, min(v + paso, objetivo))
+        self._v = v
+        return v
 
     def paso(self, deteccion: DeteccionPelota | None) -> str:
         self.ultima_deteccion = deteccion
         if deteccion is None:
             self.mundo.detener()
             self.estado = "objetivo_perdido"
+            self._v = None
             return self.estado
         self.estado = "siguiendo"
         bearing = deteccion.bearing_rad
-        distancia = deteccion.distancia_m
-        if abs(bearing) > 0.12:
-            # Pixel a la derecha => bearing positivo; girar a la derecha = yaw negativo.
-            limite_giro = (getattr(self.mundo, "velocidad_angular_autonoma_max", None)
-                           or self.mundo.perfil.velocidad_angular_max)
-            giro = max(-limite_giro, min(limite_giro, -1.6 * bearing))
-            self.mundo.mover_autonomo(0.0, 0.0, giro, duracion=0.15)
-        elif distancia > self.distancia_objetivo_m + 0.12:
-            # Toma velocidad de carrera lejos del objetivo y desacelera según
-            # la distancia observada por cámara para no pasarlo de largo.
-            limite = (getattr(self.mundo, "velocidad_autonoma_max", None)
-                      or self.mundo.perfil.velocidad_max)
-            ganancia = 1.2 if getattr(self.mundo, "velocidad_autonoma_max", None) else 0.8
-            avance = min(limite, max(0.06,
-                         (distancia - self.distancia_objetivo_m) * ganancia))
-            self.mundo.mover_autonomo(avance, 0.0, 0.0, duracion=0.15)
-        elif distancia < self.distancia_objetivo_m - 0.12:
-            self.mundo.mover_autonomo(-0.06, 0.0, 0.0, duracion=0.15)
-        else:
+        error = deteccion.distancia_m - self.distancia_objetivo_m
+        limite_giro = (getattr(self.mundo, "velocidad_angular_autonoma_max", None)
+                       or self.mundo.perfil.velocidad_angular_max)
+        limite = (getattr(self.mundo, "velocidad_autonoma_max", None)
+                  or self.mundo.perfil.velocidad_max)
+        # Pixel a la derecha => bearing positivo; girar a la derecha = yaw negativo.
+        giro = max(-limite_giro, min(limite_giro, -1.8 * bearing)) if abs(bearing) > 0.04 else 0.0
+        if abs(error) <= 0.12 and abs(bearing) <= 0.12:
             self.mundo.detener()
+            self._v = None
             self.estado = "distancia_objetivo"
+            return self.estado
+        if error > 0.12:
+            frenado = min(limite, max(0.12, 1.5 * error))
+            alineacion = max(0.0, 1.0 - abs(bearing) / self.GIRO_EN_SITIO_RAD)
+            objetivo = frenado * alineacion
+        elif error < -0.12:
+            objetivo = -0.06
+        else:
+            objetivo = 0.0                     # a distancia: solo alinear el rumbo
+        v = self._rampa(objetivo)
+        self.mundo.mover_autonomo(v, 0.0, giro, duracion=0.4)
         return self.estado
+
+
 class VistaCamaraTk:
     """Vista auxiliar opcional; usa Tkinter estándar y recibe el último frame."""
 

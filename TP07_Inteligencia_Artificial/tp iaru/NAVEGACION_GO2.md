@@ -60,13 +60,25 @@ frena para las esquinas. La velocidad baja al aproximarse al objetivo.
   aproximación final reactiva. Si se tapa, el robot sigue hacia la última
   posición estimada y, tras 8 s sin verla, retoma los waypoints. Antes
   perseguía en línea recta y oscilaba entre buscar y perseguir.
-- **Camino hacia la pelota.** A* devuelve una escalera de ángulos rectos; se
-  reemplaza por tramos rectos con atajos que mantienen el mismo margen de
-  seguridad más 0,10 m a lo largo de todo el segmento
-  (`planificacion_go2.suavizar_ruta`). Lo que se dibuja (puntos amarillos) es lo
-  que se sigue. Mientras viaja hacia la última posición conocida no hay
-  temporizador de pérdida: al llegar sin verla hace un barrido de 360° (14 s a
-  0,45 rad/s) y recién entonces retoma los waypoints.
+- **Planificación de ruta (`planificacion_go2.planificar`).** Theta* de ángulo
+  libre sobre un campo de despeje continuo (0,1 m, cacheado por mapa): parte de
+  la posición REAL del robot, llega al punto exacto pedido y los vértices pueden
+  tener cualquier ángulo (antes: A* de 4 vecinos + atajos, que dejaba escaleras y
+  rodeos). Despeje mínimo duro = margen de seguridad (0,39 m); entre ese margen y
+  +0,10 m cada metro cuesta hasta 1,6 m, así que prefiere zonas anchas salvo que
+  el rodeo sea mayor. Si no hay ruta así, cae al A* de celdas: siempre devuelve
+  ruta si existe una. Medido con `herramientas/benchmark_rutas.py` contra la ruta
+  óptima continua: 161,7 m contra 162,7 m de referencia (el A* anterior: 170,1 m,
+  +4,6 %); en 150 pares aleatorios, 7 % más corta en promedio y 18 ms por plan.
+  Los replanes conservan la velocidad (no frenan a 0) y las esquinas suaves se
+  toman sin reducir la velocidad.
+- **Acercamiento a la pelota.** La ruta termina 1 m antes de la pelota estimada
+  (no en el centro de su celda). A 2,2 m o menos, con la pelota a la vista, el
+  seguidor visual la toma SIN detenerse: avanza mientras corrige el rumbo, frena
+  de forma proporcional a la distancia (rampas de 1,8/3 m/s²) y para a 0,75 m.
+  Medido de 3 m a la parada: 1,8-2,1 s (antes 4,0 s con cámara de 10 Hz y 5,3 s a
+  4 Hz). Si la pelota se tapa, sigue el comportamiento de memoria y barrido de
+  360°.
 - **Voz.** `python -m sim --voz` escucha «busca la pelota roja» (hasta 15 s,
   antes de abrir la ventana) y luego inicia esta misma misión. Usa el
   reconocedor en español de Windows (es-ES, o el español que haya instalado).

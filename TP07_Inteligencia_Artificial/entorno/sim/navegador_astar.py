@@ -54,11 +54,22 @@ class NavegadorAstar:
     LOOKAHEAD_M = 0.80        # "zanahoria" sobre el tramo: mantiene al robot en la línea
     TOLERANCIA_ESQUINA_M = 0.30
     GANANCIA_GIRO = 2.0
-    ERROR_GIRO_EN_SITIO = 0.90   # rad; por encima gira sin avanzar
+    ERROR_GIRO_EN_SITIO = 0.90   # rad; por encima solo avanza despacio en arco
+    V_ARCO_M_S = 0.25            # velocidad máxima en esos giros cerrados
     ACEL_LINEAL = 1.5            # m/s²  (rampa de arranque/frenado)
     ACEL_ANGULAR = 5.0           # rad/s² (evita golpes de giro)
     VENTANA_ATASCO_S = 6.0
     PROGRESO_MIN_M = 0.20
+
+    def heredar_velocidad(self, anterior):
+        """Continúa con la velocidad del navegador anterior (al replanificar).
+
+        Sin esto cada replanificación arranca de 0 m/s y el robot frena y vuelve
+        a acelerar aunque siga yendo en la misma dirección.
+        """
+        if anterior is not None and anterior.estado == "navegando":
+            self._v, self._w = anterior._v, anterior._w
+            self._t_previo = anterior._t_previo
 
     def polilinea(self):
         """Vértices (x, y) de la ruta que sigue el robot, desde donde arrancó."""
@@ -133,12 +144,24 @@ class NavegadorAstar:
 
         w_deseada = max(-wmax, min(wmax, self.GANANCIA_GIRO * error))
         if abs(error) > self.ERROR_GIRO_EN_SITIO:
-            v_deseada = 0.0
+            # Giro cerrado: no se detiene del todo; avanza despacio en arco hasta
+            # ~100° de error y solo pivota en el lugar si es mayor (sin "pausas").
+            v_deseada = self.V_ARCO_M_S * max(
+                0.0, 1.0 - (abs(error) - self.ERROR_GIRO_EN_SITIO) / 0.9)
         else:
             alineacion = max(0.0, math.cos(error)) ** 2
             # Frena para la esquina (giro de 90°) y para el destino final.
-            v_frenado = (max(0.06, 0.8 * dist) if es_final
-                         else 0.35 + 1.4 * dist)
+            if es_final:
+                v_frenado = max(0.06, 0.8 * dist)
+            else:
+                # Velocidad en la esquina según cuánto gira la ruta ahí: una
+                # esquina de 20° se toma casi a fondo; una de 90° pide ~0,5 m/s.
+                (sx_, sy_), (nx_, ny_) = (ox, oy), self.puntos[self.indice + 1]
+                a1 = math.atan2(ty - sy_, tx - sx_)
+                a2 = math.atan2(ny_ - ty, nx_ - tx)
+                giro = abs((a2 - a1 + math.pi) % (2 * math.pi) - math.pi)
+                v_esquina = max(0.5, vmax * max(0.0, math.cos(giro)) ** 2)
+                v_frenado = v_esquina + 1.4 * dist
             v_deseada = min(vmax, v_frenado) * alineacion
         # Rampas de aceleración.
         dv = self.ACEL_LINEAL * dt

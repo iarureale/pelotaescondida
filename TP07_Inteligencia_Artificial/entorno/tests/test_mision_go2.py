@@ -114,12 +114,16 @@ class MisionPatioTests(unittest.TestCase):
         return ObjetoPercibido("nav_target_ball", "pelota", 160, 120, bearing,
                                distancia, 40)
 
-    def test_pelota_lejana_se_alcanza_con_astar_y_no_con_persecucion_recta(self):
+    def test_pelota_lejana_se_alcanza_por_la_ruta_planificada_y_no_con_persecucion_recta(self):
         estados = [self.mision.paso([self.pelota(9.0, 0.1)]) for _ in range(5)]
         self.assertEqual(estados[-1], "APROXIMANDO_PELOTA")
         self.assertNotIn("ACERCANDOSE", estados)
         self.assertIsNotNone(self.mision.navegador)
-        self.assertEqual(self.mision.ruta[-1], self.mision._destino_pelota)
+        # La ruta termina a DISTANCIA_PARADA_M de la pelota estimada (no en su celda).
+        fin = self.mision.navegador.polilinea()[-1]
+        est = self.mision._pelota_est
+        self.assertAlmostEqual(math.hypot(fin[0] - est[0], fin[1] - est[1]),
+                               self.mision.DISTANCIA_PARADA_M, delta=0.05)
 
     def test_un_solo_cuadro_lejano_no_interrumpe_la_ruta(self):
         self.mision.paso([self.pelota(12.0)])

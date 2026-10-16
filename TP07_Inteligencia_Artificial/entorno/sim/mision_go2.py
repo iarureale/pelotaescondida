@@ -7,7 +7,7 @@ import time
 
 from .camara_go2 import SeguidorPelota
 from .navegador_astar import NavegadorAstar
-from .planificacion_go2 import SinRuta, astar, ruta_densa, suavizar_ruta
+from .planificacion_go2 import SinRuta, planificar, recortar_final, ruta_densa
 
 
 BACKFLIP_CINEMATICO_DISPONIBLE = True
@@ -16,9 +16,12 @@ BACKFLIP_CINEMATICO_DISPONIBLE = True
 class MisionParque:
     """Explora waypoints conocidos; la celda de la pelota no se usa al planificar."""
 
-    # Una pelota a más de esta distancia se alcanza con A*; más cerca, con el
-    # control reactivo de aproximación final.
-    DISTANCIA_FINAL_M = 2.5
+    # Una pelota a más de esta distancia se alcanza con la ruta planificada; más
+    # cerca, con el control visual de aproximación final.
+    DISTANCIA_FINAL_M = 2.2
+    # El camino hacia la pelota termina a esta distancia de ella (medida sobre la
+    # ruta); desde ahí el seguidor visual la toma SIN detenerse (ver paso()).
+    DISTANCIA_PARADA_M = 1.0
     # Cuadros consecutivos para aceptar una pelota lejana (evita falsos
     # positivos de un solo píxel en el borde del frustum).
     CONFIRMACIONES_LEJOS = 4
@@ -61,6 +64,7 @@ class MisionParque:
         self._pelota_muestras = []
         self._pelota_est = None
         self._destino_pelota = None
+        self._objetivo_pelota_xy = None
         self._t_control = 0.0
         self._escaneo_desde = None
         self._persona_visible_previa = False
@@ -108,27 +112,52 @@ class MisionParque:
         self._pelota_est = (sum(p[0] for p in self._pelota_muestras) / n,
                             sum(p[1] for p in self._pelota_muestras) / n)
 
-    def _planificar_hacia_pelota(self, pose):
-        """A* hacia la celda libre más cercana a la pelota estimada."""
-        if self._pelota_est is None:
-            raise SinRuta("Sin estimación de la pelota.")
-        destino = self._celda_pose(*self._pelota_est)
-        inicio = self._celda_pose(pose["x"], pose["y"])
-        ruta = astar(self.mapa, inicio=inicio, destino=destino,
-                     margen_m=self.margen_m)
-        vertices = suavizar_ruta(self.mapa, ruta, self.margen_m + self.HOLGURA_ATAJO_M)
-        self.navegador = NavegadorAstar(self.mundo, self.mapa, vertices)
+    def _celda_continua(self, x, y):
+        """(fila, columna) fraccionarias de un punto del mundo."""
+        celda = self.mapa.tamano_celda
+        return -y / celda, x / celda
+
+    def _instalar_ruta(self, mapa, vertices):
+        """Crea el navegador para ``vertices`` y conserva la velocidad que llevaba."""
+        previo = self.navegador
+        self.navegador = NavegadorAstar(self.mundo, mapa, vertices)
+        self.navegador.heredar_velocidad(previo)
         self.ruta = ruta_densa(vertices)      # lo que se dibuja = lo que se sigue
         self.mapa.ruta = self.ruta
-        self._destino_pelota = destino
         self._ultima_replanificacion = time.monotonic()
         self.metricas["replanificaciones"] += 1
+
+    def _planificar_hacia_pelota(self, pose) -> bool:
+        """Planifica hacia la pelota estimada y se detiene DISTANCIA_PARADA_M antes.
+
+        Parte de la posición real del robot, va al punto exacto de la pelota (no
+        al centro de su celda) y recorta el final: así llega al tramo visual con
+        velocidad y alineado, sin paradas intermedias. Devuelve False si el robot
+        ya está dentro de esa distancia (no hay ruta que recorrer).
+        """
+        if self._pelota_est is None:
+            raise SinRuta("Sin estimación de la pelota.")
+        bx, by = self._pelota_est
+        if math.hypot(bx - pose["x"], by - pose["y"]) <= self.DISTANCIA_PARADA_M + 0.2:
+            self._objetivo_pelota_xy = (bx, by)
+            return False
+        vertices = planificar(self.mapa, self._celda_continua(pose["x"], pose["y"]),
+                              self._celda_continua(bx, by), self.margen_m,
+                              self.HOLGURA_ATAJO_M)
+        vertices = recortar_final(self.mapa, vertices, self.DISTANCIA_PARADA_M)
+        if len(vertices) < 2:
+            self._objetivo_pelota_xy = (bx, by)
+            return False
+        self._instalar_ruta(self.mapa, vertices)
+        self._objetivo_pelota_xy = (bx, by)
+        return True
 
     def _olvidar_pelota(self):
         self._barrido_pelota_desde = None
         self._pelota_est = None
         self._pelota_muestras = []
         self._destino_pelota = None
+        self._objetivo_pelota_xy = None
         self._confirmaciones_pelota = 0
         self._pelota_perdida_desde = None
 
@@ -168,15 +197,13 @@ class MisionParque:
     def _planificar(self, detecciones, pose=None):
         pose = pose or self.mundo.leer()
         temporal = self._mapa_temporal(detecciones, pose)
-        inicio = self._celda_pose(pose["x"], pose["y"])
         objetivo = self.waypoints[self.indice_waypoint]
-        ruta = astar(temporal, inicio=inicio, destino=objetivo,
-                     margen_m=self.margen_m)
-        vertices = suavizar_ruta(temporal, ruta, self.margen_m + self.HOLGURA_ATAJO_M)
-        self.navegador = NavegadorAstar(self.mundo, temporal, vertices)
-        self.ruta = ruta_densa(vertices)
-        self.mapa.ruta = self.ruta
-        self._ultima_replanificacion = time.monotonic()
+        vertices = planificar(temporal, self._celda_continua(pose["x"], pose["y"]),
+                              objetivo, self.margen_m, self.HOLGURA_ATAJO_M)
+        self._instalar_ruta(temporal, vertices)
+        self._bloqueo_desde = None
+        self.motivo = ""
+        self.metricas["replanificaciones"] -= 1      # _instalar_ruta ya contó una
         self._bloqueo_desde = None
         self.motivo = ""
         self.metricas["replanificaciones"] += 1
@@ -283,9 +310,11 @@ class MisionParque:
                 0.7 if self.estado in ("ACERCANDOSE", "DETECTANDO_PELOTA") else 0.0)
             cerca = pelota.distancia_m <= umbral
             necesarias = 2 if cerca else self.CONFIRMACIONES_LEJOS
+            en_marcha = self.estado == "APROXIMANDO_PELOTA"
             if self._confirmaciones_pelota >= necesarias:
                 if cerca:
-                    # Tramo final: control reactivo a la vista de la pelota.
+                    # Tramo final: control visual. Si ya venía en marcha NO se
+                    # detiene: el seguidor toma la velocidad que llevaba.
                     self.estado = "ACERCANDOSE"
                     self.motivo = "Pelota a la vista; aproximación final."
                     estado_seguidor = self.seguidor.paso(pelota)
@@ -293,24 +322,30 @@ class MisionParque:
                         self.mundo.detener()
                         self.estado = "VERIFICANDO_MANIOBRA"
                     return self.estado
-                # Pelota lejana confirmada: ir con A* (esquiva obstáculos) en
-                # lugar de perseguirla en línea recta y perderla tras un árbol.
-                refrescar = (self.estado != "APROXIMANDO_PELOTA"
-                             or self.navegador is None
-                             or self._celda_pose(*self._pelota_est)
-                             != self._destino_pelota
-                             and ahora - self._ultima_replanificacion > 2.0)
+                # Pelota lejana confirmada: ir por la ruta planificada (esquiva
+                # obstáculos) en lugar de perseguirla en línea recta.
+                mov = (self._pelota_est[0] - self._objetivo_pelota_xy[0],
+                       self._pelota_est[1] - self._objetivo_pelota_xy[1]) \
+                    if self._objetivo_pelota_xy else (9.9, 9.9)
+                refrescar = (not en_marcha or self.navegador is None
+                             or self.navegador.estado == "completado"
+                             or (math.hypot(*mov) > 0.6
+                                 and ahora - self._ultima_replanificacion > 1.0))
                 if refrescar:
                     try:
-                        self._planificar_hacia_pelota(pose)
+                        hay_ruta = self._planificar_hacia_pelota(pose)
                     except SinRuta:
                         pelota = None
                     else:
-                        self.motivo = "Pelota detectada; acercándome con A*."
+                        self.motivo = "Pelota detectada; acercándome por la ruta más corta."
+                        if not hay_ruta:        # ya está a la distancia de parada
+                            self.estado = "ACERCANDOSE"
+                            self.seguidor.paso(pelota)
+                            return self.estado
                 if pelota is not None:
                     self.estado = "APROXIMANDO_PELOTA"
                     return self.estado
-            elif cerca:
+            elif cerca and not en_marcha:
                 self.mundo.detener()
                 self.estado = "DETECTANDO_PELOTA"
                 return self.estado
