@@ -64,14 +64,19 @@ frena para las esquinas. La velocidad baja al aproximarse al objetivo.
   libre sobre un campo de despeje continuo (0,1 m, cacheado por mapa): parte de
   la posición REAL del robot, llega al punto exacto pedido y los vértices pueden
   tener cualquier ángulo (antes: A* de 4 vecinos + atajos, que dejaba escaleras y
-  rodeos). Despeje mínimo duro = margen de seguridad (0,39 m); entre ese margen y
-  +0,10 m cada metro cuesta hasta 1,6 m, así que prefiere zonas anchas salvo que
-  el rodeo sea mayor. Si no hay ruta así, cae al A* de celdas: siempre devuelve
-  ruta si existe una. Medido con `herramientas/benchmark_rutas.py` contra la ruta
-  óptima continua: 161,7 m contra 162,7 m de referencia (el A* anterior: 170,1 m,
-  +4,6 %); en 150 pares aleatorios, 7 % más corta en promedio y 18 ms por plan.
-  Los replanes conservan la velocidad (no frenan a 0) y las esquinas suaves se
-  toman sin reducir la velocidad.
+  rodeos). Despeje mínimo duro = margen de seguridad (0,39 m), así que pasa por
+  los espacios entre obstáculos y los esquiva de cerca. Opcional: con
+  `escenario.penalizacion_estrecho` > 0 en el mapa (p. ej. 0,6) prefiere rodear
+  por zonas anchas; por defecto es 0. Si no hay ruta así, cae al A* de celdas:
+  siempre devuelve ruta si existe una. Medido con `herramientas/benchmark_rutas.py`
+  contra la ruta óptima continua: 161,7 m contra 162,7 m de referencia (el A*
+  anterior: 170,1 m, +4,6 %); en 150 pares aleatorios, ~7 % más corta en
+  promedio y 18 ms por plan. Los replanes conservan la velocidad y las esquinas
+  suaves se toman sin reducir la velocidad.
+- **Recorrido de búsqueda.** `escenario.busqueda` del patio UADE atraviesa el
+  campo de obstáculos (árboles, maceteros, bancos, farolas) en lugar de bordear el
+  perímetro: pasa a menos de 1,2 m del centro de 10 objetos en 59 m (el perímetro:
+  6 en 117 m), sin colisiones, para mostrar al Go2 esquivándolos.
 - **Acercamiento a la pelota.** La ruta termina 1 m antes de la pelota estimada
   (no en el centro de su celda). A 2,2 m o menos, con la pelota a la vista, el
   seguidor visual la toma SIN detenerse: avanza mientras corrige el rumbo, frena
@@ -192,6 +197,11 @@ suelo exterior verde sin reflejos. No cambian colisiones, coordenadas ni la
 percepción (segmentación y profundidad no dependen de la luz).
 
 ## Mediciones reproducibles
+
+`python herramientas/perfil_bucle.py` mide el costo por etapa del bucle de 50 Hz
+(0,23 ms por iteración, 1,2 % del presupuesto de 20 ms) y el de un cuadro de
+cámara; `python herramientas/benchmark_rutas.py` compara el planificador con la
+ruta óptima (necesita `pip install scipy`, solo para esa medición).
 
 `python herramientas/diagnostico_marcha.py` mide pies apoyados, arrastre por
 apoyo y altura de pies/cuerpo sobre el modelo real de MuJoCo (reloj virtual).

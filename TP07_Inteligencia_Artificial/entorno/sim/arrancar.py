@@ -148,6 +148,7 @@ class SimuladorOficial:
         self._ruta_vertices = ()
         self._ruta_dibujo = []
         self._ruta_progreso = 0.0
+        self._t_reinicio = 0.0
         self.estilo_ruta = None        # EstiloRuta de sim/dibujo.py; None = flechas
         self._lock_datos = threading.Lock()
         self._hilo_percepcion = None
@@ -353,6 +354,12 @@ class SimuladorOficial:
         self._contacto_reportado = False
         self._ultima_captura_camara = 0.0
         self.ultima_percepcion = []
+        # La ruta nueva puede ser idéntica a la anterior: se descarta el progreso y
+        # los vértices viejos, y los cuadros de cámara capturados antes del reinicio.
+        self._ruta_vertices, self._ruta_dibujo, self._ruta_progreso = (), [], 0.0
+        self._t_reinicio = time.monotonic()
+        if self._trote is not None:
+            self._trote.reiniciar()
         self.mision = self._crear_mision()
         print("\n  [MISION] Reiniciada: el Go2 vuelve al inicio y repite el recorrido.")
 
@@ -520,6 +527,7 @@ class SimuladorOficial:
             while not self._pc_parar.is_set():
                 inicio = time.perf_counter()
                 with self._lock_datos:          # copia consistente de la pose
+                    t_captura = time.monotonic()
                     datos.qpos[:] = self.data.qpos
                     if self.model.nmocap:
                         datos.mocap_pos[:] = self.data.mocap_pos
@@ -532,7 +540,7 @@ class SimuladorOficial:
                 validas, descartadas = validar_pelota_con_rgb(percibidas, frame)
                 contador += 1
                 with self._pc_lock:
-                    self._pc_resultado = (contador, frame, validas, descartadas, pose)
+                    self._pc_resultado = (contador, frame, validas, descartadas, pose, t_captura)
                 resto = 0.10 - (time.perf_counter() - inicio)
                 if resto > 0:
                     self._pc_parar.wait(resto)
@@ -557,7 +565,9 @@ class SimuladorOficial:
             if resultado is None or resultado[0] == self._pc_ultimo:
                 return
             self._pc_ultimo = resultado[0]
-            _, frame, validas, descartadas, pose_captura = resultado
+            _, frame, validas, descartadas, pose_captura, t_captura = resultado
+            if t_captura < self._t_reinicio:
+                return                      # cuadro anterior al reinicio de la misión
             try:
                 self._procesar_percepcion(frame, validas, descartadas, pose_captura)
             except Exception as exc:

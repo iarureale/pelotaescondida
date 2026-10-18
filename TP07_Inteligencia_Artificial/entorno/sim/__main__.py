@@ -21,7 +21,7 @@ import time
 from .mundo import Mundo
 from .robots import ROBOTS, obtener
 from .safety import PERFILES, perfil
-from .verificar import buscar_repo_oficial, informar, verificar
+from .verificar import informar, verificar
 
 ARCHIVO_ACTIVO = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               ".simulador_activo.json")
@@ -258,7 +258,7 @@ def main(argv=None) -> int:
             print("  con el robot real los tocaria.")
             print()
             print("  Que hacer, cualquiera de las dos:")
-            print(f"    - usar el G1, que mide 0.32 m y entra")
+            print("    - usar el G1, que mide 0.32 m y entra")
             print(f"    - subir 'tamano_celda_metros' del mapa a {sugerida:.1f}")
             print("*" * 62)
             print()

@@ -55,7 +55,6 @@ class MisionParque:
         self.ruta = []
         self._ultima_replanificacion = 0.0
         self._bloqueo_desde = None
-        self._ultimo_estado = "INICIANDO"
         self._ultimo_xy = (mundo.leer()["x"], mundo.leer()["y"])
         self._inicio = time.monotonic()
         self._confirmaciones_pelota = 0
@@ -63,7 +62,6 @@ class MisionParque:
         self._barrido_pelota_desde = None
         self._pelota_muestras = []
         self._pelota_est = None
-        self._destino_pelota = None
         self._objetivo_pelota_xy = None
         self._t_control = 0.0
         self._escaneo_desde = None
@@ -156,7 +154,6 @@ class MisionParque:
         self._barrido_pelota_desde = None
         self._pelota_est = None
         self._pelota_muestras = []
-        self._destino_pelota = None
         self._objetivo_pelota_xy = None
         self._confirmaciones_pelota = 0
         self._pelota_perdida_desde = None
@@ -200,13 +197,9 @@ class MisionParque:
         objetivo = self.waypoints[self.indice_waypoint]
         vertices = planificar(temporal, self._celda_continua(pose["x"], pose["y"]),
                               objetivo, self.margen_m, self.HOLGURA_ATAJO_M)
-        self._instalar_ruta(temporal, vertices)
+        self._instalar_ruta(temporal, vertices)      # cuenta la replanificación
         self._bloqueo_desde = None
         self.motivo = ""
-        self.metricas["replanificaciones"] -= 1      # _instalar_ruta ya contó una
-        self._bloqueo_desde = None
-        self.motivo = ""
-        self.metricas["replanificaciones"] += 1
 
     def _esperar_ruta(self, ahora, mensaje):
         self.mundo.detener()
@@ -278,27 +271,6 @@ class MisionParque:
                               .get("detectar_pelota_desde_waypoint", 0))
         if pelota is not None and self.indice_waypoint < indice_busqueda:
             pelota = None
-        if self.estado == "ESCANEANDO" and pelota is None:
-            duracion = float((getattr(self.mapa, "escenario", {}) or {})
-                             .get("escaneo_duracion_s", 7.0))
-            if ahora - (self._escaneo_desde or ahora) < duracion:
-                self.mundo.mover(0.0, 0.0, 0.45, 0.25)
-                return self.estado
-            self.mundo.detener()
-            self._escaneo_desde = None
-            if self.indice_waypoint + 1 < len(self.waypoints):
-                self.indice_waypoint += 1
-                try:
-                    self._planificar(detecciones, pose)
-                    self.estado = "EXPLORANDO"
-                    self.motivo = "Sector escaneado; avanzando al siguiente waypoint."
-                except SinRuta:
-                    self.estado = "ERROR"
-                    self.motivo = "No se puede alcanzar el siguiente sector de búsqueda."
-            else:
-                self.estado = "ERROR"
-                self.motivo = "Se recorrieron los sectores sin detectar la pelota."
-            return self.estado
         if pelota is not None:
             self._pelota_perdida_desde = None
             self._barrido_pelota_desde = None
@@ -357,21 +329,31 @@ class MisionParque:
             self._confirmaciones_pelota = 0
 
         if self.estado == "ESCANEANDO":
+            # ÚNICO bloque de barrido: sirve igual con la pelota fuera de vista o con
+            # una pelota lejana aún sin confirmar. (Antes había dos: el segundo no
+            # avanzaba el índice y reiniciaba el barrido en el mismo waypoint.)
             duracion = max(0.5, float((getattr(self.mapa, "escenario", {}) or {})
                                       .get("escaneo_duracion_s", 7.0)))
             if ahora - (self._escaneo_desde or ahora) < duracion:
-                self.mundo.set_velocidad(0.0, 0.0, 0.45, duracion=0.15)
+                # 0,5 s: la orden no vence entre cuadros de cámara lentos.
+                self.mundo.set_velocidad(0.0, 0.0, 0.45, duracion=0.5)
                 self.motivo = "Barrido visual del sector, rotando en el lugar."
                 return self.estado
             self.mundo.detener()
             self._escaneo_desde = None
-            try:
-                self._planificar(detecciones, pose)
-                self.estado = "NAVEGANDO"
-            except SinRuta:
+            if self.indice_waypoint + 1 < len(self.waypoints):
+                self.indice_waypoint += 1
+                try:
+                    self._planificar(detecciones, pose)
+                    self.estado = "EXPLORANDO"
+                    self.motivo = "Sector escaneado; avanzando al siguiente waypoint."
+                except SinRuta:
+                    self.estado = "ERROR"
+                    self.motivo = "No se puede alcanzar el siguiente sector de búsqueda."
+            else:
                 self.estado = "ERROR"
-                self.motivo = "No se puede alcanzar el siguiente sector de búsqueda."
-                return self.estado
+                self.motivo = "Se recorrieron los sectores sin detectar la pelota."
+            return self.estado
         if pelota is None and self.estado in (
                 "ACERCANDOSE", "DETECTANDO_PELOTA", "APROXIMANDO_PELOTA"):
             # Pelota fuera de vista (tapada por un árbol, borde del frustum...).

@@ -21,7 +21,6 @@ import time
 
 from .trote_go2 import frecuencia_hz
 from .safety import (
-    ErrorDeSeguridad,
     PerfilSeguridad,
     validar_duracion,
     validar_velocidad,

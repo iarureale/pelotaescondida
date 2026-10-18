@@ -118,12 +118,6 @@ class EstiloRuta:
 ESTILO_FLECHAS = EstiloRuta()
 ESTILO_TRAZOS = EstiloRuta(forma="trazo", paso_m=0.50, largo_m=0.30, ancho_m=0.05,
                            z=0.06, desvanecer_m=1.2, radio_esquina_m=0.0)
-# Alias de compatibilidad (estilo de rayitas).
-Z_TRAZO = ESTILO_TRAZOS.z
-RADIO_TRAZO = ESTILO_TRAZOS.ancho_m / 2
-PASO_TRAZO_M = ESTILO_TRAZOS.paso_m
-LARGO_TRAZO_M = ESTILO_TRAZOS.largo_m
-DESVANECER_M = ESTILO_TRAZOS.desvanecer_m
 
 
 def _acumulado(polilinea):

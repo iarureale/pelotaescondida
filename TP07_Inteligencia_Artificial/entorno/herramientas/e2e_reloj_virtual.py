@@ -7,8 +7,10 @@ temporizadores de la misión. Acá se reemplaza por un reloj que avanza un paso
 fijo por ciclo, así el resultado NO depende de la velocidad de la CPU ni del
 render por software: la misma ruta da siempre el mismo recorrido. Con
 repeticiones > 1 se verifica además que el reinicio repite la trayectoria.
-Cada ciclo corresponde a un frame de cámara (DT_CAMARA) con CICLOS_CONTROL
-ejecuciones del lazo rápido de seguimiento, como en el visor real.
+Cada ciclo corresponde a un frame de cámara (DT_CAMARA, 8 Hz por defecto) con
+CICLOS_CONTROL ejecuciones del lazo rápido de seguimiento, como en el visor real.
+Para otras frecuencias usar pasos que sean potencias de 2 (p. ej. DT_CAMARA=0.25
+CICLOS_CONTROL=8) para conservar la exactitud.
 """
 import os, sys, time, math, json
 os.environ.setdefault("MUJOCO_GL", "osmesa"); os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
@@ -30,14 +32,18 @@ from sim.mundo import Mundo
 from sim.grilla import cargar
 from sim.arrancar import SimuladorOficial
 
-DT_CAMARA = float(os.environ.get("DT_CAMARA", "0.10"))
-CICLOS_CONTROL = int(os.environ.get("CICLOS_CONTROL", "5"))
+# Valores EXACTOS en binario (0,125 / 4 = 0,03125 = 2^-5): el reloj no acumula error de
+# redondeo y los umbrales de tiempo (p. ej. el barrido de 4,0 s) caen siempre del mismo
+# lado, así que dos corridas con reinicio dan trayectorias idénticas. Con pasos como
+# 0,1/5 el redondeo puede correr un umbral un ciclo y mover la trayectoria ~1 m.
+DT_CAMARA = float(os.environ.get("DT_CAMARA", "0.125"))
+CICLOS_CONTROL = int(os.environ.get("CICLOS_CONTROL", "4"))
 MAPA = os.environ.get("MAPA", "patio_uade_go2.json")
 FINALES = ("ERROR", "FINALIZADA", "BACKFLIP_SIMULADO", "BACKFLIP_OMITIDO", "BACKFLIP_NO_DISPONIBLE")
 
 if os.environ.get("SIN_PELOTA"):
     # Prueba de la ruta de búsqueda completa: la cámara "no ve" la pelota.
-    from sim import camara_go2, arrancar as _arr
+    from sim import camara_go2
     _orig = camara_go2.detectar_objetos_segmentados
     def _sin_pelota(*a, **k):
         return [o for o in _orig(*a, **k) if o.categoria != "pelota"]
@@ -50,7 +56,7 @@ class VistaNula:
 def correr(sim, mundo, limite_s):
     lateral = []
     t0 = Reloj.t; estados = []; traza = []; max_salto = 0.0; prev = None
-    giro_prev = 0.0; saltos_giro = 0.0; vel_prev = 0.0; saltos_v = 0.0
+    giro_prev = 0.0; saltos_giro = 0.0
     while Reloj.t - t0 < limite_s:
         for _ in range(CICLOS_CONTROL):
             Reloj.t += DT_CAMARA / CICLOS_CONTROL
@@ -111,6 +117,14 @@ if __name__ == "__main__":
             if mapa.celda(f, col) == 1
             and abs(px - mapa.a_mundo(f, col)[0]) < 3 and abs(py - mapa.a_mundo(f, col)[1]) < 3)
         r["despeje_min_m"] = despeje
+        # Obstáculos "esquivados": objetos que el robot pasó a menos de 1,2 m del centro
+        # (medio objeto 0,5 m + 0,34 m del robot + holgura) sin tocarlos.
+        objetos = [(o["tipo"], mapa.a_mundo(*o["celda"])) for o in mapa.escenario["objetos"]
+                   if o["tipo"] != "bandera"]
+        esquivados = {k for k, (_, (ox, oy)) in enumerate(objetos)
+                      for _, px, py, _, _ in r["traza"][::2] if math.hypot(px - ox, py - oy) < 1.2}
+        r["obstaculos_esquivados"] = len(esquivados)
+        print("obstáculos esquivados (pasó a <1,2 m de su centro): %d de %d" % (len(esquivados), len(objetos)))
         print("despeje mínimo a celdas ocupadas: %.2f m (el robot mide 0,62 x 0,28 m)" % despeje)
         resultados.append(r)
         print(f"\n=== CORRIDA {i+1} ===")

@@ -221,6 +221,48 @@ class MisionPatioTests(unittest.TestCase):
         self.assertEqual(visitados, list(range(len(self.mapa.escenario["busqueda"]))))
         self.assertIn("recorrieron los sectores", self.mision.motivo)
 
+    def _mision_escaneando(self, indice):
+        self.mision.indice_waypoint = indice
+        self.mision.estado = "ESCANEANDO"
+        self.mision.navegador = None
+        duracion = self.mapa.escenario.get("escaneo_duracion_s", 7.0)
+        self.mision._escaneo_desde = time.monotonic() - duracion - 0.1      # barrido cumplido
+        return duracion
+
+    def test_al_terminar_el_barrido_avanza_aunque_haya_una_pelota_lejana_sin_confirmar(self):
+        # Regresión: con la pelota a la vista (sin confirmar) el barrido terminaba sin
+        # avanzar el índice, replanificaba al mismo waypoint y volvía a barrer.
+        for pelota in (None, self.pelota(12.0)):
+            self.setUp()
+            self._mision_escaneando(0)
+            estado = self.mision.paso([] if pelota is None else [pelota])
+            self.assertEqual(estado, "EXPLORANDO", pelota)
+            self.assertEqual(self.mision.indice_waypoint, 1)
+            self.assertIsNone(self.mision._escaneo_desde)
+
+    def test_el_barrido_dura_lo_configurado_y_no_se_reinicia(self):
+        from unittest import mock
+        import sim.mision_go2 as mod
+        reloj = [self.mision._inicio + 10.0]
+        with mock.patch.object(mod.time, "monotonic", lambda: reloj[0]):
+            self.mision.indice_waypoint = 0
+            self.mision.estado = "ESCANEANDO"
+            self.mision._escaneo_desde = reloj[0]
+            duracion = self.mapa.escenario.get("escaneo_duracion_s", 7.0)
+            estados = []
+            for _ in range(int(duracion / 0.25) + 6):
+                reloj[0] += 0.25
+                # Avistamientos intermitentes de una pelota lejana (nunca llegan a confirmarse).
+                estados.append(self.mision.paso([self.pelota(12.0)] if len(estados) % 2 else []))
+            self.assertEqual(estados[:int(duracion / 0.25) - 1], ["ESCANEANDO"] * (int(duracion / 0.25) - 1))
+            self.assertNotIn("ESCANEANDO", estados[int(duracion / 0.25) + 1:])
+            self.assertEqual(self.mision.indice_waypoint, 1)
+
+    def test_el_barrido_del_ultimo_waypoint_termina_la_busqueda(self):
+        self._mision_escaneando(len(self.mapa.escenario["busqueda"]) - 1)
+        self.assertEqual(self.mision.paso([]), "ERROR")
+        self.assertIn("recorrieron los sectores", self.mision.motivo)
+
     def test_control_rapido_no_replanifica(self):
         antes = self.mision.metricas["replanificaciones"]
         for _ in range(100):

@@ -1,9 +1,14 @@
 """Misión del parque de punta a punta, sin ventana, con el SimuladorOficial real.
 
-Uso (desde entorno/):  VEL=0.75 python -u herramientas/e2e_mision_sin_ventana.py 235
-VEL = velocidad de carrera simulada (m/s). Con render por software (~4x más
-lento que una GPU) conviene VEL=0.75 para conservar el avance por cuadro.
-Es una medición de una sola corrida: la persona se mueve en tiempo real.
+Uso (desde entorno/):  python -u herramientas/e2e_mision_sin_ventana.py 120
+VEL = velocidad de carrera simulada (m/s), 3,0 por defecto.
+
+Reproduce el flujo de la ventana: la cámara corre en su hilo (como en
+arrancar._bucle_percepcion) y el bucle principal avanza a ~50 Hz con el
+seguimiento de ruta, sin esperar al render. Es tiempo real: con render por
+software la cámara va a ~2-3 cuadros/s, bastante más lento que con una GPU, así
+que el resultado depende de la CPU (para una medición determinista usar
+e2e_reloj_virtual.py).
 """
 import os, sys, time, math, json
 os.environ.setdefault("MUJOCO_GL","osmesa"); os.environ.setdefault("PYOPENGL_PLATFORM","osmesa")
@@ -27,9 +32,10 @@ sim.vista_camara = VistaNula()
 
 LIM = float(sys.argv[1]) if len(sys.argv)>1 else 240
 t0 = time.monotonic(); estados=[]; z_max=0; pitch_max=0; fin=None; frames=0
-STAND = None
+sim._iniciar_hilo_percepcion()
 while time.monotonic()-t0 < LIM:
     mundo.avanzar(); sim._escribir_pose()
+    sim.mision.control()                 # lazo rápido de seguimiento de ruta
     t = time.monotonic()
     sim._paso_seguimiento_visual()
     frames += 1
@@ -41,10 +47,11 @@ while time.monotonic()-t0 < LIM:
     if est in ("ERROR","FINALIZADA","BACKFLIP_SIMULADO","BACKFLIP_OMITIDO","BACKFLIP_NO_DISPONIBLE"):
         if fin is None: fin = time.monotonic()
         if time.monotonic()-fin > 3.0: break
-    time.sleep(0.01)
+    time.sleep(0.02)
+sim._detener_hilo_percepcion()
 a = mundo.leer(); q = sim.data.qpos
 print("\n=== RESULTADO E2E ===")
-print("duración real: %.1f s" % (time.monotonic()-t0), "| ciclos:", frames)
+print("duración real: %.1f s" % (time.monotonic()-t0), "| ciclos del bucle principal:", frames, "(%.0f Hz)" % (frames/(time.monotonic()-t0)))
 print("transiciones:", estados)
 print("estado final:", sim.mision.estado, "|", sim.mision.motivo)
 print("métricas:", json.dumps({k:(round(v,2) if isinstance(v,float) else v) for k,v in sim.mision.metricas.items()}))

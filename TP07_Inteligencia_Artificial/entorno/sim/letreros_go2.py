@@ -22,8 +22,6 @@ Los letreros salen del JSON del mapa (``escenario["letreros"]``), por ejemplo::
 """
 from __future__ import annotations
 
-import math
-
 # Alto de cada banda de ventanas y altura de su centro (coinciden con la
 # fachada de escena_navegacion._arquitectura_patio).
 CENTROS_PISO_M = (1.35, 2.75, 4.15, 5.55, 6.95)

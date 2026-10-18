@@ -126,6 +126,55 @@ class PlanificadorTests(unittest.TestCase):
         with self.assertRaises(SinRuta):                         # con margen 0,6 no cabe
             planificar(m, (1, 0), (1, 8), 0.60, 0.10)
 
+    def test_penalizacion_opcional_decide_entre_el_paso_estrecho_y_el_rodeo_ancho(self):
+        # Pared en la columna 7 con un hueco estrecho de 1 celda en la fila 7
+        # (despeje 0,5 m) y un paso ancho de 3 celdas en las filas 11-13.
+        g = [[0] * 15 for _ in range(15)]
+        for f in range(15):
+            if f != 7 and f not in (11, 12, 13):
+                g[f][7] = 1
+        m = Mapa("hueco", g, (7, 1), (7, 13), 1.0, "ESTE", 100)
+        ini, fin = (7.0, 1.0), (7.0, 13.0)
+        directa = planificar(m, ini, fin, MARGEN, HOLGURA, 0.0)
+        ancha = planificar(m, ini, fin, MARGEN, HOLGURA, 20.0)
+        self.assertAlmostEqual(largo(m, directa), 12.0, places=3)   # recta por el hueco
+        self.assertGreater(largo(m, ancha), 14.0)                   # rodea por el paso ancho
+        campo = P.campo_de(m)
+
+        def despeje_min(v):
+            return min(campo.en(p[0] + (q[0] - p[0]) * k / 40, p[1] + (q[1] - p[1]) * k / 40)
+                       for p, q in zip(v, v[1:]) for k in range(41))
+        self.assertLess(despeje_min(directa), 0.55)                 # pasa raspando el hueco
+        # El rodeo evita la zona penalizada: nunca baja de margen + holgura (0,49 m).
+        self.assertGreaterEqual(despeje_min(ancha), MARGEN + HOLGURA)
+
+    def test_la_penalizacion_por_defecto_sale_del_mapa(self):
+        a, b = (21, 2), tuple(self.mapa.escenario["pelota_oculta"])
+        sin = largo(self.mapa, planificar(self.mapa, a, b, MARGEN, HOLGURA))
+        self.mapa.escenario["penalizacion_estrecho"] = 5.0
+        try:
+            con = largo(self.mapa, planificar(self.mapa, a, b, MARGEN, HOLGURA))
+        finally:
+            del self.mapa.escenario["penalizacion_estrecho"]
+        self.assertGreaterEqual(con, sin - 1e-6)
+        self.assertEqual(P.PENALIZACION_ESTRECHO, 0.0)
+
+    def test_el_recorrido_de_busqueda_cruza_el_campo_de_obstaculos(self):
+        ws = [tuple(w) for w in self.mapa.escenario["busqueda"]]
+        for w in ws:
+            self.assertTrue(self.mapa.es_transitable(*w), w)
+        objetos = [tuple(o["celda"]) for o in self.mapa.escenario["objetos"] if o["tipo"] != "bandera"]
+        pts, total, cerca = [tuple(self.mapa.inicio)] + ws, 0.0, set()
+        for a, b in zip(pts, pts[1:]):
+            v = planificar(self.mapa, a, b, MARGEN, HOLGURA)
+            total += largo(self.mapa, v)
+            for p, q in zip(v, v[1:]):
+                for i in range(41):
+                    f, c = p[0] + (q[0] - p[0]) * i / 40, p[1] + (q[1] - p[1]) * i / 40
+                    cerca.update(k for k, (of, oc) in enumerate(objetos) if math.hypot(f - of, c - oc) < 1.2)
+        self.assertGreaterEqual(len(cerca), 8)                     # pasa junto a muchos obstáculos
+        self.assertLess(total, 90.0)                               # sin alargar la misión
+
     def test_recortar_final(self):
         v = [(0.0, 0.0), (0.0, 10.0), (4.0, 10.0)]
         r = recortar_final(self.mapa, v, 2.0)

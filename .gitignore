@@ -1,0 +1,16 @@
+# Archivos generados: no se versionan
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editores y sistema
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Entregas sueltas (parches y zips de cambios), no son parte del proyecto
+*.patch
+fix_*.zip

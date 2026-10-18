@@ -5,7 +5,7 @@ RAIZ_PROYECTO=<ruta> permite medir otra copia del proyecto (p. ej. la original).
 Sin GPU use MUJOCO_GL=osmesa; los tiempos de render dependen del equipo,
 los de detección (CPU) son comparables.
 """
-import os, sys, time, statistics, json
+import os, sys, time, statistics
 os.environ.setdefault("MUJOCO_GL", "osmesa"); os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
 RAIZ = os.environ.get("RAIZ_PROYECTO", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 sys.path.insert(0, RAIZ + "/entorno")

@@ -153,11 +153,13 @@ RANGO_CAMPO_M = 1.5           # despeje máximo que se calcula (más allá, "lib
 PASO_RETICULA_M = 0.50        # separación de los nodos de búsqueda
 SEGURIDAD_MUESTREO_M = 0.04   # compensa el redondeo del campo al muestrear
 ZONA_EXTREMO_M = 0.70         # cerca del inicio/destino se admite menos despeje
-# Preferencia por zonas anchas: entre el margen de seguridad (duro) y margen +
-# holgura, cada metro cuesta hasta (1 + PENALIZACION_ESTRECHO) metros. Un paso
-# estrecho se usa si el rodeo es mayor que ese sobrecosto; nunca por debajo del
-# margen duro.
-PENALIZACION_ESTRECHO = 0.6
+# Preferencia OPCIONAL por zonas anchas: entre el margen de seguridad (duro) y
+# margen + holgura, cada metro cuesta hasta (1 + penalización) metros. Con 0 (por
+# defecto) la ruta es la más corta que respeta el margen duro y pasa por los
+# espacios entre obstáculos, que es lo que muestra al Go2 esquivándolos; con
+# valores > 0 (p. ej. 0,6; ``escenario["penalizacion_estrecho"]`` en el mapa)
+# prefiere rodear por zonas anchas.
+PENALIZACION_ESTRECHO = 0.0
 _CACHE_CAMPOS: dict = {}
 
 
@@ -211,12 +213,13 @@ class CampoDespeje:
         return float(self.campo[i, j])
 
     def evaluar(self, a, b, margen_m: float, preferido_m: float,
-                tol_a: float | None = None, tol_b: float | None = None):
+                tol_a: float | None = None, tol_b: float | None = None,
+                penalizacion: float = PENALIZACION_ESTRECHO):
         """(libre, costo_m) del segmento a-b (celdas).
 
         ``libre``: despeje >= margen_m en todo el trayecto (más tolerancia cerca de
         los extremos). ``costo_m``: largo en metros ponderado por la estrechez:
-        1 + PENALIZACION_ESTRECHO cuando el despeje es el mínimo y 1 desde
+        1 + penalización cuando el despeje es el mínimo y 1 desde
         ``preferido_m`` en adelante.
         """
         np = self.np
@@ -239,7 +242,7 @@ class CampoDespeje:
             return False, math.inf
         pref = preferido_m + SEGURIDAD_MUESTREO_M
         ancho = max(1e-6, pref - duro)
-        pena = PENALIZACION_ESTRECHO * np.clip((pref - d) / ancho, 0.0, 1.0)
+        pena = penalizacion * np.clip((pref - d) / ancho, 0.0, 1.0)
         return True, float(largo_m * (1.0 + pena.mean()))
 
     def segmento_libre(self, a, b, margen_m: float, tol_a: float | None = None,
@@ -280,7 +283,7 @@ def campo_de(mapa) -> CampoDespeje:
     return campo
 
 
-def _theta_estrella(mapa, campo, inicio, destino, margen_m, preferido_m):
+def _theta_estrella(mapa, campo, inicio, destino, margen_m, preferido_m, penalizacion):
     """Theta* sobre una retícula de ``PASO_RETICULA_M``; inicio/destino exactos.
 
     Devuelve vértices [(fila, col), ...] en coordenadas de celda fraccionarias o
@@ -314,7 +317,7 @@ def _theta_estrella(mapa, campo, inicio, destino, margen_m, preferido_m):
     tol_ini, tol_fin = min(margen_m, d_ini), min(margen_m, d_fin)
 
     def evaluar(a, b, ta=None, tb=None):
-        return campo.evaluar(a, b, margen_m, preferido_m, ta, tb)
+        return campo.evaluar(a, b, margen_m, preferido_m, ta, tb, penalizacion)
 
     def los(a, b, ta=None, tb=None):
         return evaluar(a, b, ta, tb)[0]
@@ -360,7 +363,6 @@ def _theta_estrella(mapa, campo, inicio, destino, margen_m, preferido_m):
                 if costo < g.get(n, math.inf):
                     g[n], padre[n] = costo, INICIO
                     heapq.heappush(abiertos, (costo + h(pos(n)), next(orden), n))
-    contador = 0
     while abiertos:
         _, _, s = heapq.heappop(abiertos)
         if s in cerrados:
@@ -373,7 +375,6 @@ def _theta_estrella(mapa, campo, inicio, destino, margen_m, preferido_m):
             ruta.append(inicio)
             return ruta[::-1]
         cerrados.add(s)
-        contador += 1
         ps = coord(s)
         p = padre[s]
         pp = coord(p)
@@ -412,7 +413,7 @@ def _theta_estrella(mapa, campo, inicio, destino, margen_m, preferido_m):
     return None
 
 
-def _afinar(campo, vertices, margen_m, preferido_m):
+def _afinar(campo, vertices, margen_m, preferido_m, penalizacion):
     """Pasada final de atajos: solo si el atajo cuesta menos que el tramo que reemplaza."""
     if len(vertices) <= 2:
         return vertices
@@ -422,7 +423,8 @@ def _afinar(campo, vertices, margen_m, preferido_m):
 
     def costo(i, j):
         return campo.evaluar(vertices[i], vertices[j], margen_m, preferido_m,
-                             tol_ini if i == 0 else None, tol_fin if j == ultimo else None)
+                             tol_ini if i == 0 else None, tol_fin if j == ultimo else None,
+                             penalizacion)
 
     salida, i = [vertices[0]], 0
     while i < ultimo:
@@ -437,25 +439,30 @@ def _afinar(campo, vertices, margen_m, preferido_m):
     return salida
 
 
-def planificar(mapa, inicio, destino, margen_m: float, holgura_m: float = 0.10):
+def planificar(mapa, inicio, destino, margen_m: float, holgura_m: float = 0.10,
+               penalizacion: float | None = None):
     """Mejor ruta continua de ``inicio`` a ``destino`` (celdas fraccionarias).
 
     * Cualquier ángulo: vértices libres, no escalera de celdas.
     * Parte de la posición REAL del robot y llega al punto exacto pedido.
-    * Despeje mínimo duro = ``margen_m`` (radio del robot + seguridad). Entre ese
-      margen y ``margen_m + holgura_m`` los metros "cuestan" más
-      (PENALIZACION_ESTRECHO): prefiere lo ancho salvo que el rodeo sea mayor que
-      el sobrecosto. Como último recurso usa el A* de celdas, así que siempre
-      devuelve una ruta si existe una.
+    * Despeje mínimo duro = ``margen_m`` (radio del robot + seguridad). Con
+      ``penalizacion`` > 0 los metros entre ese margen y ``margen_m + holgura_m``
+      cuestan más (prefiere lo ancho salvo que el rodeo sea mayor); con 0 (por
+      defecto) es la ruta más corta. Como último recurso usa el A* de celdas, así
+      que siempre devuelve una ruta si existe una.
 
     Devuelve la lista de vértices [(fila, col), ...]; levanta ``SinRuta`` si no hay.
     """
     inicio = (float(inicio[0]), float(inicio[1]))
     destino = (float(destino[0]), float(destino[1]))
     campo = campo_de(mapa)
-    vertices = _theta_estrella(mapa, campo, inicio, destino, margen_m, margen_m + holgura_m)
+    if penalizacion is None:
+        penalizacion = float((getattr(mapa, "escenario", {}) or {}).get(
+            "penalizacion_estrecho", PENALIZACION_ESTRECHO))
+    pref = margen_m + holgura_m
+    vertices = _theta_estrella(mapa, campo, inicio, destino, margen_m, pref, penalizacion)
     if vertices is not None:
-        return [tuple(v) for v in _afinar(campo, vertices, margen_m, margen_m + holgura_m)]
+        return [tuple(v) for v in _afinar(campo, vertices, margen_m, pref, penalizacion)]
     # Último recurso: A* de celdas (garantiza completitud en la grilla).
     ruta = astar(mapa, _celda_libre(mapa, *inicio), _celda_libre(mapa, *destino), margen_m)
     return suavizar_ruta(mapa, ruta, margen_m)

@@ -22,7 +22,7 @@ class TrazosTests(unittest.TestCase):
     def test_sin_progreso_se_ve_toda_la_ruta_con_fundido_cerca_del_robot(self):
         trazos = dibujo.trazos_ruta(L, 0.0)
         self.assertGreater(len(trazos), 25)
-        self.assertLessEqual(len(trazos), 16 / dibujo.PASO_TRAZO_M + 2)   # no se acumulan
+        self.assertLessEqual(len(trazos), 16 / dibujo.ESTILO_TRAZOS.paso_m + 2)   # no se acumulan
         # El más lejano es opaco; el más cercano al robot casi transparente.
         self.assertGreater(trazos[-1][1], 0.99)
         self.assertLess(trazos[0][1], 0.5)
@@ -73,8 +73,8 @@ class EscenaTests(unittest.TestCase):
         for i in range(20, n1):
             g = scn.geoms[i]
             self.assertEqual(g.type, self.mj.mjtGeom.mjGEOM_CAPSULE)
-            self.assertAlmostEqual(g.pos[2], dibujo.Z_TRAZO, places=6)
-            self.assertGreater(g.pos[2] - dibujo.RADIO_TRAZO, 0.032)    # sobre el césped
+            self.assertAlmostEqual(g.pos[2], dibujo.ESTILO_TRAZOS.z, places=6)
+            self.assertGreater(g.pos[2] - dibujo.ESTILO_TRAZOS.ancho_m / 2, 0.032)    # sobre el césped
         # Muchos cuadros seguidos no acumulan geometrías.
         for p in [i * 0.1 for i in range(200)]:
             n = dibujo.actualizar_ruta_pendiente(scn, 20, L, p, dibujo.ESTILO_TRAZOS)

@@ -13,7 +13,7 @@ Por eso el "contacto" se mide geométricamente sobre las esferas de pie (r=0,022
                estar apoyado, y fracción del tiempo con algún pie en el suelo
 Usa reloj virtual: el resultado no depende de la velocidad de la CPU.
 """
-import math, os, sys, time
+import os, sys, time
 os.environ.setdefault("MUJOCO_GL", "osmesa")
 RAIZ = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, RAIZ + "/entorno")
@@ -66,7 +66,6 @@ def medir(vx, vy=0.0, vyaw=0.0, duracion=6.0, rampa=1.0):
         cuerpo[i] = sim.data.qpos[:3]
     sel = slice(int(n * 0.4), n)                        # régimen estable
     z = pos[sel, :, 2] - radio                           # base de la esfera
-    v_h = np.linalg.norm(np.diff(pos[sel, :, :2], axis=0), axis=2) / DT
     contacto = z[1:] < 0.004
     v_cuerpo = float(np.linalg.norm(np.diff(cuerpo[sel, :2], axis=0), axis=1).mean() / DT)
     # Arrastre por apoyo: para cada tramo continuo en contacto, cuánto se desplaza

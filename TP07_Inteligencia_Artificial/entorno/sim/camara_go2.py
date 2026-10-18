@@ -74,10 +74,6 @@ class CamaraGo2:
         self.renderer = mujoco.Renderer(model, height=alto, width=ancho)
         self.nombre = nombre
 
-    def capturar(self, data):
-        self.renderer.update_scene(data, camera=self.nombre)
-        return self.renderer.render()
-
     def capturar_sensores(self, data):
         """Entrega RGB, profundidad métrica y segmentación por geometría.
 
